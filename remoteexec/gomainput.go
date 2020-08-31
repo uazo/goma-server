@@ -37,6 +37,7 @@ type lookupClient interface {
 // gomaInput handles goma input files.
 type gomaInput struct {
 	gomaFile fpb.FileServiceClient
+	sema     chan struct{}
 
 	// key: goma file hash -> value: digest.Data
 	digestCache DigestCache
@@ -69,6 +70,7 @@ func (gi *gomaInput) toDigest(ctx context.Context, input *gomapb.ExecReq_Input) 
 	}
 	src := &gomaInputSource{
 		lookupClient: gi.gomaFile,
+		sema:         gi.sema,
 		hashKey:      hashKey,
 		filename:     input.GetFilename(),
 		blob:         input.GetContent(),
@@ -89,6 +91,7 @@ func (gi *gomaInput) upload(ctx context.Context, content []*gomapb.FileBlob) ([]
 			return nil, status.Error(codes.FailedPrecondition, "upload: contents must not be nil.")
 		}
 	}
+	// need semaphore here?
 	resp, err := gi.gomaFile.StoreFile(ctx, &gomapb.StoreFileReq{
 		Blob: content,
 	})
@@ -106,7 +109,28 @@ func (gi *gomaInput) upload(ctx context.Context, content []*gomapb.FileBlob) ([]
 	return resp.HashKey, nil
 }
 
-func lookup(ctx context.Context, c lookupClient, hashKeys []string) ([]*gomapb.FileBlob, error) {
+type gomaInputSource struct {
+	lookupClient lookupClient
+	sema         chan struct{}
+	hashKey      string
+	filename     string
+
+	mu   sync.Mutex
+	blob *gomapb.FileBlob
+}
+
+func (g *gomaInputSource) String() string {
+	g.mu.Lock()
+	blob := g.blob
+	g.mu.Unlock()
+	return fmt.Sprintf("goma-input:%s %s %p", g.hashKey, g.filename, blob)
+}
+
+func (g *gomaInputSource) Filename() string {
+	return g.filename
+}
+
+func (g *gomaInputSource) lookup(ctx context.Context, hashKeys []string) ([]*gomapb.FileBlob, error) {
 	req := &gomapb.LookupFileReq{
 		HashKey:       hashKeys,
 		RequesterInfo: requesterInfo(ctx),
@@ -114,8 +138,16 @@ func lookup(ctx context.Context, c lookupClient, hashKeys []string) ([]*gomapb.F
 	var resp *gomapb.LookupFileResp
 	var err error
 	err = rpc.Retry{}.Do(ctx, func() error {
-		resp, err = c.LookupFile(ctx, req)
-		return err
+		select {
+		case g.sema <- struct{}{}:
+			resp, err = g.lookupClient.LookupFile(ctx, req)
+			<-g.sema
+			return err
+		case <-ctx.Done():
+			logger := log.FromContext(ctx)
+			logger.Errorf("lookup failed to get semaphore: %v", ctx.Err())
+			return ctx.Err()
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -141,32 +173,12 @@ func lookup(ctx context.Context, c lookupClient, hashKeys []string) ([]*gomapb.F
 	return blobs, nil
 }
 
-type gomaInputSource struct {
-	lookupClient lookupClient
-	hashKey      string
-	filename     string
-
-	mu   sync.Mutex
-	blob *gomapb.FileBlob
-}
-
-func (g *gomaInputSource) String() string {
-	g.mu.Lock()
-	blob := g.blob
-	g.mu.Unlock()
-	return fmt.Sprintf("goma-input:%s %s %p", g.hashKey, g.filename, blob)
-}
-
-func (g *gomaInputSource) Filename() string {
-	return g.filename
-}
-
 func (g *gomaInputSource) getBlob(ctx context.Context) (*gomapb.FileBlob, error) {
 	g.mu.Lock()
 	blob := g.blob
 	g.mu.Unlock()
 	if blob == nil {
-		blobs, err := lookup(ctx, g.lookupClient, []string{g.hashKey})
+		blobs, err := g.lookup(ctx, []string{g.hashKey})
 		if err != nil {
 			return nil, err
 		}
@@ -193,10 +205,9 @@ func (g *gomaInputSource) Open(ctx context.Context) (io.ReadCloser, error) {
 
 	case gomapb.FileBlob_FILE_META:
 		return &gomaInputReader{
-			ctx:          ctx,
-			lookupClient: g.lookupClient,
-			hashKey:      g.hashKey,
-			meta:         blob,
+			ctx:  ctx,
+			src:  g,
+			meta: blob,
 		}, nil
 
 	case gomapb.FileBlob_FILE_UNSPECIFIED:
@@ -248,13 +259,12 @@ func (p *gomaInputBufferPool) release(buf []byte) {
 }
 
 type gomaInputReader struct {
-	ctx          context.Context
-	lookupClient lookupClient
-	hashKey      string
-	meta         *gomapb.FileBlob
-	i            int    // next index of hash key in meta.
-	buf          []byte // points meta hash_key[prev_i:i]'s Content.
-	allocated    []byte // allocated buffer for buf.
+	ctx       context.Context
+	src       *gomaInputSource
+	meta      *gomapb.FileBlob
+	i         int    // next index of hash key in meta.
+	buf       []byte // points meta hash_key[prev_i:i]'s Content.
+	allocated []byte // allocated buffer for buf.
 }
 
 func (r *gomaInputReader) Read(buf []byte) (int, error) {
@@ -270,19 +280,19 @@ func (r *gomaInputReader) Read(buf []byte) (int, error) {
 		if j > len(r.meta.HashKey) {
 			j = len(r.meta.HashKey)
 		}
-		blobs, err := lookup(r.ctx, r.lookupClient, r.meta.HashKey[r.i:j])
+		blobs, err := r.src.lookup(r.ctx, r.meta.HashKey[r.i:j])
 		if err != nil {
-			return 0, status.Errorf(status.Code(err), "lookup chunk in FILE_META %s %d:%d %s: %v", r.hashKey, r.i, j, r.meta.HashKey[r.i:j], err)
+			return 0, status.Errorf(status.Code(err), "lookup chunk in FILE_META %s %d:%d %s: %v", r.src.hashKey, r.i, j, r.meta.HashKey[r.i:j], err)
 		}
 		for i, blob := range blobs {
 			if blob.GetBlobType() != gomapb.FileBlob_FILE_CHUNK {
-				return 0, status.Errorf(codes.Internal, "lookup chunk in FILE_META %s %d %s: not FILE_CHUNK %v", r.hashKey, r.i+i, r.meta.HashKey[r.i+i], blob.GetBlobType())
+				return 0, status.Errorf(codes.Internal, "lookup chunk in FILE_META %s %d %s: not FILE_CHUNK %v", r.src.hashKey, r.i+i, r.meta.HashKey[r.i+i], blob.GetBlobType())
 			}
 		}
 		if len(r.allocated) == 0 {
 			r.allocated, err = inputBufferPool.allocate(r.ctx, r.meta.GetFileSize())
 			if err != nil {
-				return 0, status.Errorf(codes.ResourceExhausted, "allocate buffer for FILE_META %s size=%d: %v", r.hashKey, r.meta.GetFileSize(), err)
+				return 0, status.Errorf(codes.ResourceExhausted, "allocate buffer for FILE_META %s size=%d: %v", r.src.hashKey, r.meta.GetFileSize(), err)
 			}
 		}
 		b := r.allocated
@@ -292,7 +302,7 @@ func (r *gomaInputReader) Read(buf []byte) (int, error) {
 		for i, blob := range blobs {
 			n := copy(b[pos:], blob.Content)
 			if n < len(blob.Content) {
-				return 0, status.Errorf(codes.Internal, "goma input buffer shortage %d written, len(blob.Content)=%d for %s %d %s", n, len(blob.Content), r.hashKey, i0+i, r.meta.HashKey[i0+i])
+				return 0, status.Errorf(codes.Internal, "goma input buffer shortage %d written, len(blob.Content)=%d for %s %d %s", n, len(blob.Content), r.src.hashKey, i0+i, r.meta.HashKey[i0+i])
 			}
 			pos += n
 		}

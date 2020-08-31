@@ -240,8 +240,6 @@ func makeInput(tb testing.TB, content, filename string) *gomapb.ExecReq_Input {
 }
 
 func TestUploadInputFiles(t *testing.T) {
-	sema := make(chan struct{}, 3)
-
 	inputs := make([]*gomapb.ExecReq_Input, 6)
 	for i := range inputs {
 		inputs[i] = makeInput(t, fmt.Sprintf("content %d", i), fmt.Sprintf("input_%d", i))
@@ -299,7 +297,7 @@ func TestUploadInputFiles(t *testing.T) {
 
 			gi.setInputs(tc.stored)
 
-			err := uploadInputFiles(ctx, tc.inputs, gi, sema)
+			err := uploadInputFiles(ctx, tc.inputs, gi)
 
 			sort.Strings(gi.uploaded)
 			sort.Strings(tc.wantUploaded)
@@ -317,8 +315,6 @@ func TestUploadInputFiles(t *testing.T) {
 }
 
 func TestInputFiles(t *testing.T) {
-	sema := make(chan struct{}, 3)
-
 	// These are minimal function / map that are not being tested.
 	rootRel := func(filename string) (string, error) { return filename, nil }
 	executableInputs := map[string]bool{}
@@ -453,7 +449,7 @@ func TestInputFiles(t *testing.T) {
 			gi.setInputs(tc.stored)
 			ctx := context.Background()
 
-			results := inputFiles(ctx, tc.inputs, gi, rootRel, executableInputs, sema)
+			results := inputFiles(ctx, tc.inputs, gi, rootRel, executableInputs)
 
 			digestDataComparer := cmp.Comparer(func(x, y digest.Data) bool {
 				if x == nil && y == nil {
@@ -495,10 +491,9 @@ func BenchmarkInputFiles(b *testing.B) {
 	gi.setInputs(inputs)
 	rootRel := func(filename string) (string, error) { return filename, nil }
 	executableInputs := map[string]bool{}
-	sema := make(chan struct{}, 5)
 	ctx := log.NewContext(context.Background(), nopLogger{})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		inputFiles(ctx, inputs, gi, rootRel, executableInputs, sema)
+		inputFiles(ctx, inputs, gi, rootRel, executableInputs)
 	}
 }

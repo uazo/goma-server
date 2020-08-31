@@ -77,6 +77,24 @@ func inputPaths(filepath clientFilePath, req *gomapb.ExecReq, argv0 string) ([]s
 		}
 		paths = append(paths, filepath.Clean(argv0))
 	}
+	for _, dir := range req.GetCommandSpec().GetCxxSystemIncludePath() {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		paths = append(paths, filepath.Clean(dir))
+	}
+	for _, dir := range req.GetCommandSpec().GetSystemIncludePath() {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		paths = append(paths, filepath.Clean(dir))
+	}
+	for _, dir := range req.GetCommandSpec().GetSystemFrameworkPath() {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		paths = append(paths, filepath.Clean(dir))
+	}
 	return paths, nil
 }
 

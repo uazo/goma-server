@@ -256,7 +256,10 @@ type gomaInputInterface interface {
 	Close()
 }
 
-func uploadInputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInputInterface, sema chan struct{}) error {
+func uploadInputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInputInterface) error {
+	ctx, span := trace.StartSpan(ctx, "go.chromium.org/goma/server/remoteexec.request.uploadInputFiles")
+	defer span.End()
+	span.AddAttributes(trace.Int64Attribute("uploads", int64(len(inputs))))
 	count := 0
 	size := 0
 	batchLimit := 500
@@ -282,11 +285,6 @@ func uploadInputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi go
 		inputs := inputs[beginOffset : i+1]
 		results := hashKeys[beginOffset : i+1]
 		eg.Go(func() error {
-			sema <- struct{}{}
-			defer func() {
-				<-sema
-			}()
-
 			contents := make([]*gomapb.FileBlob, len(inputs))
 			for i, input := range inputs {
 				contents[i] = input.Content
@@ -360,22 +358,17 @@ type inputFileResult struct {
 	err           error
 }
 
-func inputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInputInterface, rootRel func(string) (string, error), executableInputs map[string]bool, sema chan struct{}) []inputFileResult {
+func inputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInputInterface, rootRel func(string) (string, error), executableInputs map[string]bool) []inputFileResult {
 	logger := log.FromContext(ctx)
 	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+	ctx, span := trace.StartSpan(ctx, "go.chromium.org/goma/server/remoteexec.request.inputFiles")
+	defer span.End()
+	span.AddAttributes(trace.Int64Attribute("inputs", int64(len(inputs))))
 	results := make([]inputFileResult, len(inputs))
 	for i, input := range inputs {
 		wg.Add(1)
 		go func(input *gomapb.ExecReq_Input, result *inputFileResult) {
 			defer wg.Done()
-			sema <- struct{}{}
-			defer func() {
-				<-sema
-			}()
-
 			fname, err := rootRel(input.GetFilename())
 			if err != nil {
 				if err == errOutOfRoot {
@@ -408,7 +401,6 @@ func inputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInpu
 		}(input, &results[i])
 	}
 	wg.Wait()
-
 	return results
 }
 
@@ -471,25 +463,28 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	cleanCWD := r.filepath.Clean(r.gomaReq.GetCwd())
 	cleanRootDir := r.filepath.Clean(r.tree.RootDir())
 
+	start := time.Now()
 	results := inputFiles(ctx, r.gomaReq.Input, r.input, func(filename string) (string, error) {
 		return rootRel(r.filepath, filename, cleanCWD, cleanRootDir)
-	}, executableInputs, r.f.FileLookupSema)
-	for _, result := range results {
-		if result.err != nil {
-			r.err = result.err
-			return nil
-		}
-	}
-
+	}, executableInputs)
 	uploads := make([]*gomapb.ExecReq_Input, 0, len(r.gomaReq.Input))
 	for i, input := range r.gomaReq.Input {
 		result := &results[i]
+		if r.err == nil && result.err != nil {
+			r.err = result.err
+		}
 		if result.uploaded {
 			uploads = append(uploads, input)
 		}
 	}
+	if r.err != nil {
+		logger.Warnf("inputFiles=%d uploads=%d in %s err:%v", len(r.gomaReq.Input), len(uploads), time.Since(start), r.err)
+		return nil
+	}
+	logger.Infof("inputFiles=%d uploads=%d in %s", len(r.gomaReq.Input), len(uploads), time.Since(start))
 
-	err = uploadInputFiles(ctx, uploads, r.input, r.f.FileLookupSema)
+	start = time.Now()
+	err = uploadInputFiles(ctx, uploads, r.input)
 	if err != nil {
 		r.err = err
 		return nil
@@ -510,7 +505,7 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 			uploaded++
 		}
 	}
-	logger.Infof("upload %d inputs out of %d", uploaded, len(r.gomaReq.Input))
+	logger.Infof("upload %d inputs, missing %d inputs out of %d in %s", uploaded, len(missingInputs), len(r.gomaReq.Input), time.Since(start))
 	if len(missingInputs) > 0 {
 		r.gomaResp.MissingInput = missingInputs
 		r.gomaResp.MissingReason = missingReason
@@ -738,7 +733,6 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		if rand.Float64() < r.f.HardeningRatio {
 			logger.Infof("run with InputRootAbsolutePath + runsc")
 			r.addPlatformProperty(ctx, "dockerRuntime", "runsc")
-			r.addPlatformProperty(ctx, "label:runsc", "available")
 		} else {
 			logger.Infof("run with InputRootAbsolutePath")
 		}
@@ -758,7 +752,6 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		if rand.Float64() < r.f.HardeningRatio {
 			logger.Infof("run with chdir + runsc: relocatable")
 			r.addPlatformProperty(ctx, "dockerRuntime", "runsc")
-			r.addPlatformProperty(ctx, "label:runsc", "available")
 		} else {
 			logger.Infof("run with chdir: relocatable")
 		}

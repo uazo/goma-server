@@ -32,7 +32,8 @@ var (
 	// Increased from Default 10 seconds for quota limit.
 	// The recommended reporting period by Stackdriver Monitoring is >= 1 minute:
 	// https://cloud.google.com/monitoring/custom-metrics/creating-metrics#writing-ts
-	reportingInterval = time.Minute
+	// https://pkg.go.dev/go.opencensus.io/stats/view?tab=doc#SetReportingPeriod
+	reportingInterval = 90 * time.Second
 )
 
 // Init initializes opencensus instrumentations, and error reporter.

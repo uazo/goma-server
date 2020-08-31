@@ -341,6 +341,7 @@ func TestInputRootDir(t *testing.T) {
 			}
 			continue
 		}
+		t.Logf("paths=%q", paths)
 		if err != nil {
 			t.Errorf("inputPaths(req, %q)=%v, %v; want nil error", tc.argv0, paths, err)
 		}

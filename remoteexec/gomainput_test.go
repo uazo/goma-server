@@ -27,6 +27,7 @@ func TestUploadWork(t *testing.T) {
 
 	gi := gomaInput{
 		gomaFile:    cluster.adapter.GomaFile,
+		sema:        make(chan struct{}, 1),
 		digestCache: cluster.adapter.DigestCache,
 	}
 
@@ -61,6 +62,7 @@ func TestUploadShouldReturnErrorOnNilContent(t *testing.T) {
 
 	gi := gomaInput{
 		gomaFile:    cluster.adapter.GomaFile,
+		sema:        make(chan struct{}, 1),
 		digestCache: cluster.adapter.DigestCache,
 	}
 

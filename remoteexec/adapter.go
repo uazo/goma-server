@@ -230,6 +230,7 @@ func (f *Adapter) newRequest(ctx context.Context, gomaReq *gomapb.ExecReq) *requ
 		digestStore: gs,
 		input: &gomaInput{
 			gomaFile:    f.GomaFile,
+			sema:        f.FileLookupSema,
 			digestCache: f.DigestCache,
 		},
 		action: &rpb.Action{

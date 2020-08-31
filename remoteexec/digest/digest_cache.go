@@ -169,11 +169,13 @@ func (c *Cache) Get(ctx context.Context, key string, src Source) (Data, error) {
 		c.mu.Unlock()
 		logger.Infof("digest cache set %s => %v: %s", keystr, d, time.Since(start))
 		err = c.cacheSet(ctx, key, d.Digest())
+		op := "cache-set"
 		if err != nil {
 			logger.Warnf("digest cache set fail %s => %v: %v: %s", keystr, d, err, time.Since(start))
+			op = "cache-set-fail"
 		}
 		stats.RecordWithTags(ctx, []tag.Mutator{
-			tag.Upsert(opKey, "cache-set"),
+			tag.Upsert(opKey, op),
 			tag.Upsert(fileExtKey, fileExt),
 		}, cacheStats.M(1))
 	}
