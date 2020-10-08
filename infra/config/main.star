@@ -1,5 +1,10 @@
 #!/usr/bin/env lucicfg
 
+lucicfg.check_version("1.18.4", "Please update depot_tools")
+
+# Enable LUCI Realms support.
+lucicfg.enable_experiment("crbug.com/1085650")
+
 luci.project(
     name = "goma-server",
 
@@ -55,7 +60,13 @@ luci.bucket(
             roles = acl.BUILDBUCKET_TRIGGERER,
             groups = "project-goma-server-tryjob-access",
         ),
-    ]
+    ],
+    bindings = [
+        luci.binding(
+            roles = "role/swarming.taskTriggerer",
+            groups = "flex-try-led-users",
+        ),
+    ],
 )
 
 
