@@ -291,6 +291,11 @@ func llvmArgRelocatable(filepath clientFilePath, args []string) error {
 			// -mllvm -sanitizer-coverage-prune-blocks=1
 			// https://github.com/llvm/llvm-project/blob/93ec6cd684265161623b4ea67836f022cd18c224/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
 
+		case strings.HasPrefix(arg, "-enable-dse-memoryssa="):
+			// https://crbug.com/1127713
+			// -mllvm -enable-dse-memoryssa={true,false}
+			// doesn't take a path related value.
+
 		default:
 			return fmt.Errorf("llvm unknown arg: %s", arg)
 		}
