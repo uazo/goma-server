@@ -359,6 +359,18 @@ func TestGccRelocatableReq(t *testing.T) {
 				"-mllvm", "-sanitizer-coverage-prune-blocks=1"),
 			relocatable: true,
 		},
+		{
+			desc: "-mllvm -enable-dse-memoryssa=true",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-mllvm", "-enable-dse-memoryssa=true"),
+			relocatable: true,
+		},
+		{
+			desc: "-mllvm -enable-dse-memoryssa=false",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-mllvm", "-enable-dse-memoryssa=false"),
+			relocatable: true,
+		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			err := gccRelocatableReq(posixpath.FilePath{}, tc.args, tc.envs)
