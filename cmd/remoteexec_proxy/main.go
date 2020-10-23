@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"html/template"
@@ -61,14 +62,15 @@ import (
 var (
 	port = flag.Int("port", 8090, "listening port (goma api endpoints)")
 
-	remoteexecAddr         = flag.String("remoteexec-addr", "", "remoteexec API endpoint")
-	remoteInstanceName     = flag.String("remote-instance-name", "", "remote instance name")
-	allowedUsers           = flag.String("allowed-users", "", "comma separated list of allowed users. `*@domain` will match any user in domain. if empty, current user is allowed.")
-	serviceAccountJSON     = flag.String("service-account-json", "", "service account json, used to talk to RBE and cloud storage (if --file-cache-bucket is used)")
-	platformContainerImage = flag.String("platform-container-image", "", "docker uri of platform container image")
-	insecureRemoteexec     = flag.Bool("insecure-remoteexec", false, "insecure grpc for remoteexec API")
-	insecureSkipVerify     = flag.Bool("insecure-skip-verify", false, "insecure skip verifying the server certificate")
-	execMaxRetryCount      = flag.Int("exec-max-retry-count", 5, "max retry count for exec call. 0 is unlimited count, but bound to ctx timtout. Use small number for powerful clients to run local fallback quickly. Use large number for powerless clients to use remote more than local.")
+	remoteexecAddr           = flag.String("remoteexec-addr", "", "remoteexec API endpoint")
+	remoteInstanceName       = flag.String("remote-instance-name", "", "remote instance name")
+	allowedUsers             = flag.String("allowed-users", "", "comma separated list of allowed users. `*@domain` will match any user in domain. if empty, current user is allowed.")
+	serviceAccountJSON       = flag.String("service-account-json", "", "service account json, used to talk to RBE and cloud storage (if --file-cache-bucket is used)")
+	platformContainerImage   = flag.String("platform-container-image", "", "docker uri of platform container image")
+	insecureRemoteexec       = flag.Bool("insecure-remoteexec", false, "insecure grpc for remoteexec API")
+	insecureSkipVerify       = flag.Bool("insecure-skip-verify", false, "insecure skip verifying the server certificate")
+	additionalTLSCertificate = flag.String("additional-tls-certificate", "", "additional TLS root certificate for verifying the server certificate")
+	execMaxRetryCount        = flag.Int("exec-max-retry-count", 5, "max retry count for exec call. 0 is unlimited count, but bound to ctx timtout. Use small number for powerful clients to run local fallback quickly. Use large number for powerless clients to use remote more than local.")
 
 	fileCacheBucket = flag.String("file-cache-bucket", "", "file cache bucking store bucket")
 
@@ -351,8 +353,25 @@ func main() {
 		},
 	}
 
+	certPool, err := x509.SystemCertPool()
+	if err != nil {
+		logger.Fatal(err)
+	}
+	if certPool == nil {
+		logger.Fatal("got nil certPool")
+	}
+	if *additionalTLSCertificate != "" {
+		caCert, err := ioutil.ReadFile(*additionalTLSCertificate)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		if ok := certPool.AppendCertsFromPEM(caCert); !ok {
+			logger.Fatal("No certificates loaded from %s", *additionalTLSCertificate)
+		}
+	}
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: *insecureSkipVerify,
+		RootCAs: certPool,
 	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
