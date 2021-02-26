@@ -12,6 +12,16 @@ import (
 	"go.chromium.org/goma/server/command/descriptor/posixpath"
 )
 
+func TestGccPathFlags(t *testing.T) {
+	lastP := pathFlags[0]
+	for _, p := range pathFlags[1:] {
+		if len(lastP) < len(p) {
+			t.Errorf("%q is longer than %q", p, lastP)
+		}
+		lastP = p
+	}
+}
+
 func TestGccRelocatableReq(t *testing.T) {
 
 	baseReleaseArgs := []string{
@@ -190,6 +200,22 @@ func TestGccRelocatableReq(t *testing.T) {
 			relocatable: false,
 		},
 		{
+			desc: "sysroot separate relative",
+			args: append(modifyArgs(baseReleaseArgs,
+				"--sysroot",
+				"--sysroot"),
+				"../../build/linux/debian_sid_amd64-sysroot"),
+			relocatable: true,
+		},
+		{
+			desc: "sysroot separate absolute",
+			args: append(modifyArgs(baseReleaseArgs,
+				"--sysroot",
+				"--sysroot"),
+				"/b/c/b/linux/build/linux/debian_sid_amd64-sysroot"),
+			relocatable: false,
+		},
+		{
 			desc: "llvm -asan option",
 			// https://b/issues/141210713#comment3
 			args: append(append([]string{}, baseReleaseArgs...),
@@ -360,6 +386,24 @@ func TestGccRelocatableReq(t *testing.T) {
 			relocatable: true,
 		},
 		{
+			desc: "framework include search path -F.",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-F."),
+			relocatable: true,
+		},
+		{
+			desc: "framework include search path -F/App/Framework",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-F/App/Framework"),
+			relocatable: false,
+		},
+		{
+			desc: "-target",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-target", "x86_64-linux-gnu"),
+			relocatable: true,
+		},
+		{
 			desc: "-mllvm -enable-dse-memoryssa=true",
 			args: append(append([]string{}, baseReleaseArgs...),
 				"-mllvm", "-enable-dse-memoryssa=true"),
@@ -369,6 +413,12 @@ func TestGccRelocatableReq(t *testing.T) {
 			desc: "-mllvm -enable-dse-memoryssa=false",
 			args: append(append([]string{}, baseReleaseArgs...),
 				"-mllvm", "-enable-dse-memoryssa=false"),
+			relocatable: true,
+		},
+		{
+			desc: "-Wa,--fatal-warnings",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"-Wa,--fatal-warnings"),
 			relocatable: true,
 		},
 	} {

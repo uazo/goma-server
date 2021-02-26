@@ -11,6 +11,7 @@ import (
 
 	"go.chromium.org/goma/server/command/descriptor/posixpath"
 	gomapb "go.chromium.org/goma/server/proto/api"
+	nsjailpb "go.chromium.org/goma/server/proto/nsjail"
 )
 
 func TestPathFromToolchainSpec(t *testing.T) {
@@ -129,5 +130,13 @@ func TestPathFromToolchainSpec(t *testing.T) {
 				t.Errorf("pathFromToolchainSpec(%v, %v) = %q; want %q", tc.cfp, tc.ts, actual, tc.want)
 			}
 		})
+	}
+}
+
+func TestNsjailHardeningConfig(t *testing.T) {
+	cfg := &nsjailpb.NsJailConfig{}
+	err := proto.UnmarshalText(nsjailHardeningConfig, cfg)
+	if err != nil {
+		t.Errorf("unmarshal\n%s\n => %v", nsjailHardeningConfig, err)
 	}
 }

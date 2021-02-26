@@ -81,6 +81,9 @@ var (
 	traceProjectID = flag.String("trace-project-id", "", "project id for cloud tracing")
 	traceFraction  = flag.Float64("trace-sampling-fraction", 1.0, "sampling fraction for stackdriver trace")
 	traceQPS       = flag.Float64("trace-sampling-qps-limit", 1.0, "sampling qps limit for stackdriver trace")
+
+	redisMaxIdleConns   = flag.Int("redis-max-idle-conns", redis.DefaultMaxIdleConns, "maximum number of idle connections to redis.")
+	redisMaxActiveConns = flag.Int("redis-max-active-conns", redis.DefaultMaxActiveConns, "maximum number of active connections to redis.")
 )
 
 func myEmail(ctx context.Context) string {
@@ -258,6 +261,16 @@ func readConfigResp(fname string) (*cmdpb.ConfigResp, error) {
 }
 
 func main() {
+	spanTimeout := remoteexec.DefaultSpanTimeout
+	flag.DurationVar(&spanTimeout.Inventory, "exec-inventory-timeout", spanTimeout.Inventory, "timeout of exec-inventory")
+	flag.DurationVar(&spanTimeout.InputTree, "exec-input-tree-timeout", spanTimeout.InputTree, "timeout of exec-iput-tree")
+	flag.DurationVar(&spanTimeout.Setup, "exec-setup-timeout", spanTimeout.Setup, "timeout of exec-setup")
+	flag.DurationVar(&spanTimeout.CheckCache, "exec-check-cache-timeout", spanTimeout.CheckCache, "timeout of exec-check-cache")
+	flag.DurationVar(&spanTimeout.CheckMissing, "exec-check-missing-timeout", spanTimeout.CheckMissing, "timeout of exec-check-missing")
+	flag.DurationVar(&spanTimeout.UploadBlobs, "exec-upload-blobs-timeout", spanTimeout.UploadBlobs, "timeout of exec-upload-blobs")
+	flag.DurationVar(&spanTimeout.Execute, "exec-execute-timeout", spanTimeout.Execute, "timeout of exec-execute")
+	flag.DurationVar(&spanTimeout.Response, "exec-response-timeout", spanTimeout.Response, "timeout of exec-response")
+
 	flag.Parse()
 	ctx := context.Background()
 
@@ -371,7 +384,7 @@ func main() {
 	}
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: *insecureSkipVerify,
-		RootCAs: certPool,
+		RootCAs:            certPool,
 	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
@@ -394,13 +407,18 @@ func main() {
 		logger.Warnf("redis disabled for gomafile-digest: %v", err)
 		digestCache = digest.NewCache(nil, *maxDigestCacheEntries)
 	} else {
-		logger.Infof("redis enabled for gomafile-digest: %v", redisAddr)
-		digestCache = digest.NewCache(redis.NewClient(ctx, redisAddr, "gomafile-digest:"), *maxDigestCacheEntries)
+		logger.Infof("redis enabled for gomafile-digest: %v idle=%d active=%d", redisAddr, *redisMaxIdleConns, *redisMaxActiveConns)
+		digestCache = digest.NewCache(redis.NewClient(ctx, redisAddr, redis.Opts{
+			Prefix:         "gomafile-digest:",
+			MaxIdleConns:   *redisMaxIdleConns,
+			MaxActiveConns: *redisMaxActiveConns,
+		}), *maxDigestCacheEntries)
 	}
 
 	re := &remoteexec.Adapter{
 		InstancePrefix: path.Dir(*remoteInstanceName),
 		ExecTimeout:    15 * time.Minute,
+		SpanTimeout:    spanTimeout,
 		Client: remoteexec.Client{
 			ClientConn: reConn,
 			Retry: rpc.Retry{

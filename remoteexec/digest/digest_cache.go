@@ -17,6 +17,8 @@ import (
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"go.chromium.org/goma/server/log"
 	cachepb "go.chromium.org/goma/server/proto/cache"
@@ -153,9 +155,13 @@ func (c *Cache) Get(ctx context.Context, key string, src Source) (Data, error) {
 		}
 		return d, nil
 	}
-	logger.Infof("digest cache miss %s %v: %s", keystr, err, time.Since(start))
+	op := "get-error"
+	if status.Code(err) == codes.NotFound {
+		op = "miss"
+	}
+	logger.Infof("digest cache %s %s %v: %s", op, keystr, err, time.Since(start))
 	stats.RecordWithTags(ctx, []tag.Mutator{
-		tag.Upsert(opKey, "miss"),
+		tag.Upsert(opKey, op),
 		tag.Upsert(fileExtKey, fileExt),
 	}, cacheStats.M(0))
 	d, err := FromSource(ctx, src)

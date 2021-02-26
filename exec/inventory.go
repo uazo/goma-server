@@ -20,6 +20,7 @@ import (
 	"go.opencensus.io/tag"
 	"go.opencensus.io/trace"
 
+	"go.chromium.org/goma/server/auth/enduser"
 	"go.chromium.org/goma/server/command/descriptor"
 	"go.chromium.org/goma/server/command/normalizer"
 	"go.chromium.org/goma/server/log"
@@ -164,6 +165,7 @@ func (s byName) Less(i, j int) bool {
 type platformConfig struct {
 	dimensionSet       map[string]bool
 	remoteexecPlatform *cmdpb.RemoteexecPlatform
+	acl                *cmdpb.ACL
 }
 
 // Configure sets config in the inventory.
@@ -186,6 +188,7 @@ func (in *Inventory) Configure(ctx context.Context, cfgs *cmdpb.ConfigResp) erro
 			newPlatformConfigs = append(newPlatformConfigs, &platformConfig{
 				dimensionSet:       dimensionSet,
 				remoteexecPlatform: cfg.GetRemoteexecPlatform(),
+				acl:                cfg.GetAcl(),
 			})
 			logger.Infof("configure platform config: %v", cfg)
 			continue
@@ -267,6 +270,35 @@ func (in *Inventory) status() (string, []*cmdpb.Config) {
 	return in.versionID, resp
 }
 
+func checkACL(ctx context.Context, acl *cmdpb.ACL) error {
+	if acl == nil {
+		return nil
+	}
+	eu, ok := enduser.FromContext(ctx)
+	if len(acl.DisallowedGroups) > 0 {
+		if !ok {
+			return errors.New("no enduser group in context")
+		}
+		for _, g := range acl.DisallowedGroups {
+			if g == eu.Group {
+				return fmt.Errorf("enduser group %q not allowed (in disallowed groups)", eu.Group)
+			}
+		}
+	}
+	if len(acl.AllowedGroups) > 0 {
+		if !ok {
+			return errors.New("no enduser group in context")
+		}
+		for _, g := range acl.AllowedGroups {
+			if g == eu.Group {
+				return nil
+			}
+		}
+		return fmt.Errorf("enduser group %q not allowed (not in allowed groups)", eu.Group)
+	}
+	return nil
+}
+
 // pickCmd takes selectors of compiler and subprograms, and returns configs of
 // the best cmd_server that has both compiler and subprograms.
 // First, it find out cmd_server that has both selectors of compiler and
@@ -317,6 +349,10 @@ Loop:
 		cfg, ok := m[cmdSel]
 		if !ok {
 			logger.Errorf("cfg for %v is not registered. possibly configs broken.", cmdSel)
+			continue
+		}
+		if err := checkACL(ctx, cfg.Acl); err != nil {
+			logger.Errorf("cfg for %v; access denied: %v", cmdSel, err)
 			continue
 		}
 		ccfgs = append(ccfgs, cfg)
@@ -501,6 +537,10 @@ func (in *Inventory) pickFromExecReq(ctx context.Context, req *gomapb.ExecReq, r
 	// select the first one.
 	var matchedConfig *platformConfig
 	for _, pCfg := range in.platformConfigs {
+		if err := checkACL(ctx, pCfg.acl); err != nil {
+			logger.Errorf("pcfg %v; access denied: %v", pCfg, err)
+			continue
+		}
 		if matchDimensions(dimensions, pCfg.dimensionSet) {
 			matchedConfig = pCfg
 			break

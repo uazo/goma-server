@@ -185,6 +185,23 @@ message Config {
   // If this config is configured for arbitrary toolchain support,
   // set dimensions of the config. Otherwise, this should be nil.
   repeated string dimensions = 6;
+
+  ACL acl = 7;
+}
+
+// ACL is access control list for requester.
+message ACL {
+  // Groups that is allowed to use.
+  // If allowed_groups specified, only groups in allowed_groups are
+  // allowed, and other groups are disallowed.
+  // If no allowed_groups specified, any groups are allowed
+  // if it is not disallowed by disallowed_groups.
+  repeated string allowed_groups = 1;
+
+  // Groups that is not allowed to use.
+  // If no disallowed_groups specified, only allowed_groups is allowed to use.
+  // If both are not specified, any groups are alllowed.
+  repeated string disallowed_groups = 2;
 }
 
 // Platform is a set of requirements, such as haredware, operting system
@@ -199,7 +216,7 @@ message Platform {
 }
 
 // RuntimeConfig is config for runtime.
-// NEXT ID TO USE: 9
+// NEXT ID TO USE: 10
 message RuntimeConfig {
   // name of runtime.
   //
@@ -246,6 +263,8 @@ message RuntimeConfig {
   // selector field that is not specified in disallowed_commands will
   // match any selector.
   repeated Selector disallowed_commands = 5;
+
+  ACL acl = 9;
 }
 
 // PlatformRuntimeConfig is a config to use the runtime.

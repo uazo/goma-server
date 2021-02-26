@@ -12,12 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer"
+	bpb "github.com/bazelbuild/remote-apis-sdks/go/pkg/balancer/proto"
+	"github.com/bazelbuild/remote-apis-sdks/go/pkg/client"
 	"go.opencensus.io/plugin/ocgrpc"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"go.chromium.org/goma/server/log"
 	pb "go.chromium.org/goma/server/proto/backend"
 	execpb "go.chromium.org/goma/server/proto/exec"
 	execlogpb "go.chromium.org/goma/server/proto/execlog"
@@ -27,12 +31,41 @@ import (
 // FromRemoteBackend creates new GRPC from cfg.
 // returned func would release resources associated with GRPC.
 func FromRemoteBackend(ctx context.Context, cfg *pb.RemoteBackend, opt Option) (GRPC, func(), error) {
-	conn, err := grpc.DialContext(ctx, cfg.Address,
+	logger := log.FromContext(ctx)
+	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
 		grpc.WithStatsHandler(&ocgrpc.ClientHandler{}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time: 10 * time.Second,
-		}))
+		}),
+	}
+	// TODO: configurable?
+	// use the same default as re-client (remote-apis-sdks).
+	// but don't set MaxConcurrentStreamsLowWatermark not to
+	// open more connections to avoid "Too many open files" error
+	// in nginx.  crbug.com/1151576
+	ac := &bpb.ApiConfig{
+		ChannelPool: &bpb.ChannelPoolConfig{
+			MaxSize: client.DefaultMaxConcurrentRequests,
+		},
+		Method: []*bpb.MethodConfig{
+			{
+				Name: []string{".*"},
+				Affinity: &bpb.AffinityConfig{
+					Command:     bpb.AffinityConfig_BIND,
+					AffinityKey: "bind-affinity",
+				},
+			},
+		},
+	}
+	logger.Infof("api_config=%s", ac)
+	grpcInt := balancer.NewGCPInterceptor(ac)
+	opts = append(opts,
+		grpc.WithBalancerName(balancer.Name),
+		grpc.WithUnaryInterceptor(grpcInt.GCPUnaryClientInterceptor),
+		grpc.WithStreamInterceptor(grpcInt.GCPStreamClientInterceptor))
+
+	conn, err := grpc.DialContext(ctx, cfg.Address, opts...)
 	if err != nil {
 		return GRPC{}, func() {}, err
 	}

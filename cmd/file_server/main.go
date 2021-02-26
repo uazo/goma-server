@@ -43,6 +43,9 @@ var (
 	traceProjectID = flag.String("trace-project-id", "", "project id for cloud tracing")
 
 	serviceAccountFile = flag.String("service-account-file", "", "service account json file")
+
+	redisMaxIdleConns   = flag.Int("redis-max-idle-conns", redis.DefaultMaxIdleConns, "maximum number of idle connections to redis.")
+	redisMaxActiveConns = flag.Int("redis-max-active-conns", redis.DefaultMaxActiveConns, "maximum number of active connections to redis.")
 )
 
 type admissionController struct {
@@ -99,8 +102,12 @@ func main() {
 	addr, err := redis.AddrFromEnv()
 	switch {
 	case err == nil:
-		logger.Infof("redis enabled for gomafile: %s", addr)
-		c := redis.NewClient(ctx, addr, "gomafile:")
+		logger.Infof("redis enabled for gomafile: %s  idle=%d active=%d", addr, *redisMaxIdleConns, *redisMaxActiveConns)
+		c := redis.NewClient(ctx, addr, redis.Opts{
+			Prefix:         "gomafile:",
+			MaxIdleConns:   *redisMaxIdleConns,
+			MaxActiveConns: *redisMaxActiveConns,
+		})
 		defer c.Close()
 		cclient = c
 

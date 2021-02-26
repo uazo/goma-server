@@ -14,9 +14,11 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"go.opencensus.io/plugin/ocgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
 	"go.chromium.org/goma/server/log"
@@ -69,6 +71,10 @@ func NewGRPC(port int, opts ...grpc.ServerOption) (GRPC, error) {
 		return GRPC{}, err
 	}
 	opts = append(opts,
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: false,
+		}),
 		grpc.StatsHandler(&ocgrpc.ServerHandler{}),
 		grpc.UnaryInterceptor(func() func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
 			interceptor := log.GRPCUnaryServerInterceptor()

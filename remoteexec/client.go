@@ -226,6 +226,7 @@ func erespErr(ctx context.Context, eresp *rpb.ExecuteResponse) error {
 	//   requested, such as a missing input or command or
 	//   no worker being available. The client may be able to
 	//   fix the errors and retry.
+	//   exec_server doesn't fix request, so don't retry.
 	// UNAVAILABLE:
 	//   Due to transient condition, such as all workers being
 	//   occupied (and the server does not support a queue), the
@@ -239,11 +240,11 @@ func erespErr(ctx context.Context, eresp *rpb.ExecuteResponse) error {
 	// Other error would be non retriable.
 	switch codes.Code(st.GetCode()) {
 	case codes.OK:
-	case codes.ResourceExhausted:
+	case codes.ResourceExhausted, codes.FailedPrecondition:
 		logger.Warnf("execute response: status=%s", st)
 		return status.FromProto(st).Err()
 
-	case codes.FailedPrecondition, codes.Internal:
+	case codes.Internal:
 		logger.Warnf("execute response: status=%s", st)
 		fallthrough
 	case codes.Unavailable:

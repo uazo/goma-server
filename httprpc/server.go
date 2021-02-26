@@ -341,10 +341,10 @@ func Handler(name string, req, resp proto.Message, h func(context.Context, proto
 		// assume most call needs less than 1 minute (both exec,
 		// file access),
 		// according to API metrics, 99%ile of Execute API latency
-		// was 33.225 seconds (as of May 15, 2019).
+		// was ~45 seconds (as of Nov 19, 2020).
 		// only a few exec call may need longer timeout.
 		// see below if status.Code(err) == codes.DeadlineExceeded case.
-		timeouts := []time.Duration{40 * time.Second, 1 * time.Minute, 3 * time.Minute, 5 * time.Minute}
+		timeouts := []time.Duration{50 * time.Second, 90 * time.Second, 3 * time.Minute, 5 * time.Minute}
 		var resp proto.Message
 		authOK := false
 		err = opt.retry.Do(ctx, func() error {

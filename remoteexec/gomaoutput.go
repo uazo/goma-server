@@ -41,8 +41,16 @@ type gomaOutput struct {
 	gomaFile fpb.FileServiceClient
 }
 
-func retryCAS(ctx context.Context, f func(ctx context.Context) error) error {
-	timeout := 3 * time.Second
+func outputTimeout(size int64) time.Duration {
+	// assume at least 4MB/s
+	t := time.Duration(int64((float64(size) / (4 * 1024 * 1024)) * 1e9))
+	if t < 3*time.Second {
+		return 3 * time.Second
+	}
+	return t
+}
+
+func retryCAS(ctx context.Context, timeout time.Duration, f func(ctx context.Context) error) error {
 	n := 0
 	return rpc.Retry{}.Do(ctx, func() error {
 		n++
@@ -54,51 +62,59 @@ func retryCAS(ctx context.Context, f func(ctx context.Context) error) error {
 	})
 }
 
-func (g gomaOutput) stdoutData(ctx context.Context, eresp *rpb.ExecuteResponse) {
+func (g gomaOutput) stdoutData(ctx context.Context, eresp *rpb.ExecuteResponse) error {
 	if len(eresp.Result.StdoutRaw) > 0 {
 		g.gomaResp.Result.StdoutBuffer = eresp.Result.StdoutRaw
-		return
+		return nil
 	}
 	if eresp.Result.StdoutDigest == nil {
-		return
+		return nil
 	}
 	var buf bytes.Buffer
-	err := retryCAS(ctx, func(ctx context.Context) error {
+	err := retryCAS(ctx, outputTimeout(eresp.Result.StdoutDigest.SizeBytes), func(ctx context.Context) error {
 		return cas.DownloadDigest(ctx, g.bs, &buf, g.instance, eresp.Result.StdoutDigest)
 	})
 	if err != nil {
 		logger := log.FromContext(ctx)
 		logger.Errorf("failed to fetch stdout %v: %v", eresp.Result.StdoutDigest, err)
+		if status.Code(err) == codes.Unauthenticated {
+			return err
+		}
 		g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, fmt.Sprintf("failed to fetch stdout %v: %s", eresp.Result.StdoutDigest, status.Code(err)))
-		return
+		return nil
 	}
 	g.gomaResp.Result.StdoutBuffer = buf.Bytes()
+	return nil
 }
 
-func (g gomaOutput) stderrData(ctx context.Context, eresp *rpb.ExecuteResponse) {
+func (g gomaOutput) stderrData(ctx context.Context, eresp *rpb.ExecuteResponse) error {
 	if len(eresp.Result.StderrRaw) > 0 {
 		g.gomaResp.Result.StderrBuffer = eresp.Result.StderrRaw
-		return
+		return nil
 	}
 	if eresp.Result.StderrDigest == nil {
-		return
+		return nil
 	}
 	var buf bytes.Buffer
-	err := retryCAS(ctx, func(ctx context.Context) error {
+	err := retryCAS(ctx, outputTimeout(eresp.Result.StderrDigest.SizeBytes), func(ctx context.Context) error {
 		return cas.DownloadDigest(ctx, g.bs, &buf, g.instance, eresp.Result.StderrDigest)
 	})
 	if err != nil {
 		logger := log.FromContext(ctx)
 		logger.Errorf("failed to fetch stderr %v: %v", eresp.Result.StdoutDigest, err)
+		if status.Code(err) == codes.Unauthenticated {
+			return err
+		}
 		g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, fmt.Sprintf("failed to fetch stderr %v: %s", eresp.Result.StderrDigest, status.Code(err)))
-		return
+		return nil
 	}
 	g.gomaResp.Result.StderrBuffer = buf.Bytes()
+	return nil
 }
 
 func (g gomaOutput) outputFileHelper(ctx context.Context, fname string, output *rpb.OutputFile) (*gomapb.ExecResult_Output, error) {
 	var blob *gomapb.FileBlob
-	err := retryCAS(ctx, func(ctx context.Context) error {
+	err := retryCAS(ctx, outputTimeout(output.GetDigest().GetSizeBytes()), func(ctx context.Context) error {
 		var err error
 		blob, err = g.toFileBlob(ctx, output)
 		return err
@@ -111,7 +127,7 @@ func (g gomaOutput) outputFileHelper(ctx context.Context, fname string, output *
 		default:
 			logger.Errorf("goma blob for %s: %v", output.Path, err)
 		}
-		return nil, fmt.Errorf("goma blob for %s: %v", output.Path, status.Code(err))
+		return nil, status.Errorf(status.Code(err), "goma blob for %s: %v", output.Path, status.Code(err))
 	}
 	return &gomapb.ExecResult_Output{
 		Filename:     proto.String(fname),
@@ -120,16 +136,20 @@ func (g gomaOutput) outputFileHelper(ctx context.Context, fname string, output *
 	}, nil
 }
 
-func (g gomaOutput) outputFile(ctx context.Context, fname string, output *rpb.OutputFile) {
+func (g gomaOutput) outputFile(ctx context.Context, fname string, output *rpb.OutputFile) error {
 	result, err := g.outputFileHelper(ctx, fname, output)
 	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			return err
+		}
 		g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, err.Error())
-		return
+		return nil
 	}
 	g.gomaResp.Result.Output = append(g.gomaResp.Result.Output, result)
+	return nil
 }
 
-func (g gomaOutput) outputFilesConcurrent(ctx context.Context, outputs []*rpb.OutputFile, sema chan struct{}) {
+func (g gomaOutput) outputFilesConcurrent(ctx context.Context, outputs []*rpb.OutputFile, sema chan struct{}) error {
 	var wg sync.WaitGroup
 	results := make([]*gomapb.ExecResult_Output, len(outputs))
 	errs := make([]error, len(outputs))
@@ -154,11 +174,16 @@ func (g gomaOutput) outputFilesConcurrent(ctx context.Context, outputs []*rpb.Ou
 			g.gomaResp.Result.Output = append(g.gomaResp.Result.Output, result)
 		}
 	}
+	var rerr error
 	for _, err := range errs {
 		if err != nil {
+			if status.Code(err) == codes.Unauthenticated {
+				rerr = err
+			}
 			g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, err.Error())
 		}
 	}
+	return rerr
 }
 
 func toChunkedFileBlob(ctx context.Context, rd io.Reader, size int64, fs fpb.FileServiceClient) (*gomapb.FileBlob, error) {
@@ -197,7 +222,7 @@ func toChunkedFileBlob(ctx context.Context, rd io.Reader, size int64, fs fpb.Fil
 			return err
 		})
 		if err != nil {
-			return nil, fmt.Errorf("store blob failed offset=%d: %v", offset, err)
+			return nil, status.Errorf(status.Code(err), "store blob failed offset=%d: %v", offset, err)
 		}
 		for _, hashKey := range resp.HashKey {
 			if hashKey == "" {
@@ -217,7 +242,7 @@ func toChunkedFileBlob(ctx context.Context, rd io.Reader, size int64, fs fpb.Fil
 		return nil, fmt.Errorf("more bytes were read past end: %d", n)
 	}
 	if err != io.EOF {
-		return nil, fmt.Errorf("could not confirm EOF: %v", err)
+		return nil, status.Errorf(status.Code(err), "could not confirm EOF: %v", err)
 	}
 	return blob, nil
 }
@@ -264,7 +289,7 @@ func (g gomaOutput) toFileBlob(ctx context.Context, output *rpb.OutputFile) (*go
 
 	blob, err := toChunkedFileBlob(ctx, rd, output.Digest.SizeBytes, g.gomaFile)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to convert %v to chunked FileBlob: %v", output, err)
+		return nil, status.Errorf(status.Code(err), "failed to convert output:{%v} to chunked FileBlob: %v", output, err)
 	}
 	if err = <-casErrCh; err != nil {
 		return nil, err
@@ -304,27 +329,30 @@ func traverseTree(ctx context.Context, filepath clientFilePath, dname string, di
 	return result
 }
 
-func (g gomaOutput) outputDirectory(ctx context.Context, filepath clientFilePath, dname string, output *rpb.OutputDirectory, sema chan struct{}) {
+func (g gomaOutput) outputDirectory(ctx context.Context, filepath clientFilePath, dname string, output *rpb.OutputDirectory, sema chan struct{}) error {
 	logger := log.FromContext(ctx)
 	if output.TreeDigest == nil {
 		logger.Warnf("no tree digest in %s", dname)
-		return
+		return nil
 	}
 	var buf bytes.Buffer
-	err := retryCAS(ctx, func(ctx context.Context) error {
+	err := retryCAS(ctx, outputTimeout(output.TreeDigest.SizeBytes), func(ctx context.Context) error {
 		return cas.DownloadDigest(ctx, g.bs, &buf, g.instance, output.TreeDigest)
 	})
 	if err != nil {
 		logger.Errorf("failed to download tree %s: %v", dname, err)
+		if status.Code(err) == codes.Unauthenticated {
+			return err
+		}
 		g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, fmt.Sprintf("failed to download tree %s: %s", dname, status.Code(err)))
-		return
+		return nil
 	}
 	tree := &rpb.Tree{}
 	err = proto.Unmarshal(buf.Bytes(), tree)
 	if err != nil {
 		logger.Errorf("failed to unmarshal tree data %s: %v", dname, err)
 		g.gomaResp.ErrorMessage = append(g.gomaResp.ErrorMessage, fmt.Sprintf("failed to unmarshal tree data %s: %v", dname, err))
-		return
+		return nil
 	}
 
 	ds := digest.NewStore()
@@ -337,7 +365,7 @@ func (g gomaOutput) outputDirectory(ctx context.Context, filepath clientFilePath
 		ds.Set(d)
 	}
 	outputFiles := traverseTree(ctx, filepath, dname, tree.Root, ds)
-	g.outputFilesConcurrent(ctx, outputFiles, sema)
+	return g.outputFilesConcurrent(ctx, outputFiles, sema)
 }
 
 // reduceRespSize attempts to reduce the encoded size of `g.gomaResp` to under `byteLimit`.
@@ -375,7 +403,7 @@ func (g gomaOutput) reduceRespSize(ctx context.Context, byteLimit int, sema chan
 			return err
 		})
 		if err != nil {
-			return nil, fmt.Errorf("store blob failed: %v", err)
+			return nil, status.Errorf(status.Code(err), "store blob failed: %v", err)
 		}
 		if len(resp.HashKey) != 1 {
 			return nil, fmt.Errorf("store blob got len(resp.HashKey)=%d, want=1", len(resp.HashKey))

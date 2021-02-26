@@ -144,7 +144,12 @@ message ExecResult {
 
 // Common RPC message
 
-// NEXT ID TO USE: 12
+message PlatformProperty {
+  optional string name = 1;
+  optional string value = 2;
+}
+
+// NEXT ID TO USE: 14
 message RequesterInfo {
   optional string addr = 1;  // requester's ip addr.
   optional string username = 2;  // requester's user name
@@ -205,6 +210,14 @@ message RequesterInfo {
   }
   // Requester's path style.
   optional PathStyle path_style = 11;
+
+  // re-client compat flags
+  // The exec root of the command.
+  optional string exec_root = 12;
+  // This is used to identify remote platform settings like the docker image
+  // to use to run the command.
+  repeated PlatformProperty platform_properties = 13;
+
 }
 
 message RequesterEnv {

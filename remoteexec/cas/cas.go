@@ -328,14 +328,18 @@ func (c CAS) Upload(ctx context.Context, instance string, sema chan struct{}, bl
 				st := status.FromProto(res.GetStatus())
 				if st.Code() != codes.OK {
 					span.Annotatef(nil, "batch update blob %v: %v", res.Digest, res.Status)
-					return grpc.Errorf(st.Code(), "batch update blob %v: %v", res.Digest, res.Status)
+					missing.Blobs = append(missing.Blobs, MissingBlob{
+						Digest: res.Digest,
+						Err:    grpc.Errorf(st.Code(), "batch update blob: %v", res.Status),
+					})
 				}
 			}
 			uploaded = true
-			logger.Infof("upload by batch %d blobs in %s", len(batchReq.Requests), time.Since(t))
+			logger.Infof("upload by batch %d blobs (missing:%d) in %s", len(batchReq.Requests), len(missing.Blobs), time.Since(t))
 		}
 	}
 	logger.Infof("upload by streaming from %d out of %d", len(largeBlobs), len(blobs))
+	t := time.Now()
 	for _, blob := range largeBlobs {
 		data, ok := c.Store.Get(blob)
 		if !ok {
@@ -350,10 +354,6 @@ func (c CAS) Upload(ctx context.Context, instance string, sema chan struct{}, bl
 			rd, err := data.Open(ctx)
 			if err != nil {
 				span.Annotatef(nil, "upload open %v: %v", blob, err)
-				missing.Blobs = append(missing.Blobs, MissingBlob{
-					Digest: blob,
-					Err:    err,
-				})
 				return err
 			}
 			err = UploadDigest(ctx, c.Client.ByteStream(), instance, blob, rd)
@@ -366,9 +366,14 @@ func (c CAS) Upload(ctx context.Context, instance string, sema chan struct{}, bl
 		})
 		if err != nil {
 			logger.Errorf("upload streaming %s error: %v", blob, err)
+			missing.Blobs = append(missing.Blobs, MissingBlob{
+				Digest: blob,
+				Err:    err,
+			})
 			continue
 		}
 	}
+	logger.Infof("uploaded by streaming %d (missing:%d) in %s", len(blobs), len(missing.Blobs), time.Since(t))
 	if len(missing.Blobs) > 0 {
 		return missing
 	}

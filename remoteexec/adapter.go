@@ -41,6 +41,31 @@ type DigestCache interface {
 	Get(context.Context, string, digest.Source) (digest.Data, error)
 }
 
+// SpanTimeout specifies Timeout for exec span.
+// 0 is no time out.
+type SpanTimeout struct {
+	Inventory    time.Duration
+	InputTree    time.Duration
+	Setup        time.Duration
+	CheckCache   time.Duration
+	CheckMissing time.Duration
+	UploadBlobs  time.Duration
+	Execute      time.Duration
+	Response     time.Duration
+}
+
+// DefaultSpanTimeout is default timeout.
+var DefaultSpanTimeout = SpanTimeout{
+	Inventory:    1 * time.Second,
+	InputTree:    60 * time.Second,
+	Setup:        1 * time.Second,
+	CheckCache:   3 * time.Second,
+	CheckMissing: 10 * time.Second,
+	UploadBlobs:  60 * time.Second,
+	Execute:      0,
+	Response:     30 * time.Second,
+}
+
 // Adapter is an adapter from goma API to remoteexec API.
 type Adapter struct {
 	// InstancePrefix is the prefix (dirname) of the full RBE instance name.
@@ -48,8 +73,15 @@ type Adapter struct {
 	// then InstancePrefix is "projects/$PROJECT/instances"
 	InstancePrefix string
 
-	Inventory   exec.Inventory
+	// InstanceBaseName is the name (basename) of the full RBE instance name.
+	// If emtpy, use "default_instance".
+	InstanceBaseName string
+
+	Inventory exec.Inventory
+	// ExecTimeout is timeout of Action in RBE.
 	ExecTimeout time.Duration
+	// SpanTimeout is timeout of each span in a Goma Exec request.
+	SpanTimeout SpanTimeout
 
 	// Client is remoteexec API client.
 	Client         Client
@@ -81,6 +113,10 @@ type Adapter struct {
 
 	// Ratio to enable hardening.
 	HardeningRatio float64
+	// Ratio to use nsjail for hardening.
+	NsjailRatio float64
+	// sha256 file hash to disable hardening.
+	DisableHardenings []string
 
 	capMu        sync.Mutex
 	capabilities *rpb.ServerCapabilities
@@ -176,8 +212,12 @@ func (f *Adapter) client(ctx context.Context) Client {
 	return client
 }
 
-func (f *Adapter) DefaultInstance() string {
-	return path.Join(f.InstancePrefix, "default_instance")
+func (f *Adapter) Instance() string {
+	name := f.InstanceBaseName
+	if name == "" {
+		name = "default_instance"
+	}
+	return path.Join(f.InstancePrefix, name)
 }
 
 func (f *Adapter) ensureCapabilities(ctx context.Context) {
@@ -190,7 +230,7 @@ func (f *Adapter) ensureCapabilities(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	var err error
 	f.capabilities, err = f.client(ctx).GetCapabilities(ctx, &rpb.GetCapabilitiesRequest{
-		InstanceName: f.DefaultInstance(),
+		InstanceName: f.Instance(),
 	})
 	if err != nil {
 		logger.Errorf("GetCapabilities: %v", err)
@@ -321,6 +361,10 @@ func (f *Adapter) Exec(ctx context.Context, req *gomapb.ExecReq) (resp *gomapb.E
 			logger.Errorf("failed to record stats: %v", err)
 		}
 	}()
+	err = exec.RecordRequesterInfo(ctx, req.GetRequesterInfo())
+	if err != nil {
+		logger.Errorf("failed to record stats: %v", err)
+	}
 
 	// Use this to collect all timestamps and then print on one line,
 	// regardless of where this function returns.
@@ -335,7 +379,7 @@ func (f *Adapter) Exec(ctx context.Context, req *gomapb.ExecReq) (resp *gomapb.E
 	defer r.Close()
 	espan.req = r
 
-	dur := espan.Do(ctx, "inventory", 1*time.Second, func(ctx context.Context) {
+	dur := espan.Do(ctx, "inventory", f.SpanTimeout.Inventory, func(ctx context.Context) {
 		resp = r.getInventoryData(ctx)
 	})
 	if resp != nil {
@@ -343,7 +387,7 @@ func (f *Adapter) Exec(ctx context.Context, req *gomapb.ExecReq) (resp *gomapb.E
 		return resp, nil
 	}
 
-	dur = espan.Do(ctx, "input tree", 30*time.Second, func(ctx context.Context) {
+	dur = espan.Do(ctx, "input tree", f.SpanTimeout.InputTree, func(ctx context.Context) {
 		resp = r.newInputTree(ctx)
 	})
 	if resp != nil {
@@ -351,31 +395,31 @@ func (f *Adapter) Exec(ctx context.Context, req *gomapb.ExecReq) (resp *gomapb.E
 		return resp, nil
 	}
 
-	espan.Do(ctx, "setup", 1*time.Second, func(ctx context.Context) {
+	espan.Do(ctx, "setup", f.SpanTimeout.Setup, func(ctx context.Context) {
 		r.setupNewAction(ctx)
 	})
 
 	eresp := &rpb.ExecuteResponse{}
 	var cached bool
-	espan.Do(ctx, "check cache", 3*time.Second, func(ctx context.Context) {
+	espan.Do(ctx, "check cache", f.SpanTimeout.CheckCache, func(ctx context.Context) {
 		eresp.Result, cached = r.checkCache(ctx)
 	})
 	if !cached {
 		var blobs []*rpb.Digest
 		var err error
-		espan.Do(ctx, "check missing", 10*time.Second, func(ctx context.Context) {
+		espan.Do(ctx, "check missing", f.SpanTimeout.CheckMissing, func(ctx context.Context) {
 			blobs, err = r.missingBlobs(ctx)
 		})
 		if err != nil {
-			logger.Errorf("error in check missing blobs: %v", err)
+			logger.Errorf("exec call: error in check missing blobs: %v", err)
 			return nil, err
 		}
 
-		espan.Do(ctx, "upload blobs", 30*time.Second, func(ctx context.Context) {
+		espan.Do(ctx, "upload blobs", f.SpanTimeout.UploadBlobs, func(ctx context.Context) {
 			resp, err = r.uploadBlobs(ctx, blobs)
 		})
 		if err != nil {
-			logger.Errorf("error in upload blobs: %v", err)
+			logger.Errorf("exec call: error in upload blobs: %v", err)
 			return nil, err
 		}
 		if resp != nil {
@@ -383,16 +427,19 @@ func (f *Adapter) Exec(ctx context.Context, req *gomapb.ExecReq) (resp *gomapb.E
 			return resp, nil
 		}
 
-		espan.Do(ctx, "execute", 0, func(ctx context.Context) {
+		espan.Do(ctx, "execute", f.SpanTimeout.Execute, func(ctx context.Context) {
 			eresp, err = r.executeAction(ctx)
 		})
 		if err != nil {
-			logger.Infof("execute err=%v", err)
+			logger.Errorf("exec call: execute err=%v", err)
 			return nil, err
 		}
 	}
-	espan.Do(ctx, "response", 30*time.Second, func(ctx context.Context) {
+	espan.Do(ctx, "response", f.SpanTimeout.Response, func(ctx context.Context) {
 		resp, err = r.newResp(ctx, eresp, cached)
 	})
+	if err != nil {
+		logger.Errorf("exec call: resp err=%v", err)
+	}
 	return resp, err
 }

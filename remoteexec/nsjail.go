@@ -15,7 +15,116 @@ import (
 )
 
 const (
-	nsjailRunWrapperScript = `#!/bin/bash
+	nsjailHardeningConfig = `
+name: "hardening by nsjail (seccomp-bpf)"
+mode: ONCE
+# keep_env = true
+mount_proc: true
+# it runs in docker container, so ok to mount / as RO.
+mount <
+ src: "/"
+ dst: "/"
+ is_bind: true
+ rw: false
+ is_dir: true
+>
+mount <
+ dst: "/tmp"
+ fstype: "tmpfs"
+ options: "size=5000000"
+ rw: true
+ is_dir: true
+>
+# input root is per request, so ok to mount it as RW.
+# (does not affect to other requests).
+mount <
+ prefix_src_env: "INPUT_ROOT"
+ src: ""
+ prefix_dst_env: "INPUT_ROOT"
+ dst: ""
+ is_bind: true
+ rw: true
+ is_dir: true
+>
+# default may fail with "File too large"
+rlimit_fsize_type: INF
+rlimit_as_type: INF
+# syscalls used by clang.
+seccomp_string: "ALLOW {"
+seccomp_string: "  access,"
+seccomp_string: "  alarm,"
+seccomp_string: "  arch_prctl,"
+seccomp_string: "  brk,"
+seccomp_string: "  close,"
+seccomp_string: "  clone,"
+seccomp_string: "  connect,"
+seccomp_string: "  dup2,"
+seccomp_string: "  execve,"
+seccomp_string: "  exit_group,"
+seccomp_string: "  fcntl,"
+seccomp_string: "  futex,"
+seccomp_string: "  getcwd,"
+seccomp_string: "  getdents,"
+seccomp_string: "  getdents64,"
+seccomp_string: "  getegid,"
+seccomp_string: "  geteuid,"
+seccomp_string: "  getgid,"
+seccomp_string: "  getpgrp,"
+seccomp_string: "  getpid,"
+seccomp_string: "  getppid,"
+seccomp_string: "  getuid,"
+seccomp_string: "  gettid,"
+seccomp_string: "  getrlimit,"
+seccomp_string: "  ioctl,"
+seccomp_string: "  lseek,"
+seccomp_string: "  mmap,"
+seccomp_string: "  mprotect,"
+seccomp_string: "  mremap,"
+seccomp_string: "  munmap,"
+seccomp_string: "  newfstat,"
+seccomp_string: "  newlstat,"
+seccomp_string: "  newstat,"
+seccomp_string: "  newuname,"
+seccomp_string: "  open,"
+seccomp_string: "  openat,"
+seccomp_string: "  pipe,"
+seccomp_string: "  pipe2,"
+seccomp_string: "  pread64,"
+seccomp_string: "  prlimit64,"
+seccomp_string: "  read,"
+seccomp_string: "  readlink,"
+seccomp_string: "  rename,"
+seccomp_string: "  rt_sigaction,"
+seccomp_string: "  rt_sigprocmask,"
+seccomp_string: "  rt_sigreturn, "
+seccomp_string: "  set_robust_list,"
+seccomp_string: "  set_tid_address,"
+seccomp_string: "  sigaltstack,"
+seccomp_string: "  socket,"
+seccomp_string: "  sysinfo,"
+seccomp_string: "  unlink,"
+seccomp_string: "  vfork,"
+seccomp_string: "  wait4,"
+seccomp_string: "  write,"
+seccomp_string: "  writev"
+seccomp_string: "}"
+seccomp_string: "DEFAULT KILL"
+#seccomp_log: true
+iface_no_lo: true
+`
+	nsjailHardeningWrapperScript = `#!/bin/bash
+export INPUT_ROOT="$(pwd)"
+if [[ "$WORK_DIR" != "" ]]; then
+  cd "${WORK_DIR}"
+fi
+export PWD="$(pwd)"
+# exit 159 -> seccomp violation
+nsjail -q -C "./nsjail.cfg" --cwd "$PWD" \
+       --  \
+       "$@"
+`
+
+	nsjailChrootRunWrapperScript = `#!/bin/bash
 set -e
 
 if [[ "$WORK_DIR" == "" ]]; then
@@ -88,8 +197,8 @@ func pathFromToolchainSpec(cfp clientFilePath, ts []*gomapb.ToolchainSpec) strin
 
 // nsjailConfig returns nsjail configuration.
 // When you modify followings, please make sure it matches
-// nsjailRunWrapperScript above.
-func nsjailConfig(cwd string, cfp clientFilePath, ts []*gomapb.ToolchainSpec, envs []string) []byte {
+// nsjailChrootRunWrapperScript above.
+func nsjailChrootConfig(cwd string, cfp clientFilePath, ts []*gomapb.ToolchainSpec, envs []string) []byte {
 	chrootWorkdir := "/tmp/goma_chroot"
 	cfg := &nsjailpb.NsJailConfig{
 		Uidmap: []*nsjailpb.IdMap{

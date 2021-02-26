@@ -817,7 +817,7 @@ func TestAdapterHandleOutputsWithSystemIncludePaths(t *testing.T) {
 	if action == nil {
 		t.Fatalf("gotAction is nil")
 	}
-	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.DefaultInstance(), ".", action.InputRootDigest)
+	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.Instance(), ".", action.InputRootDigest)
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -929,7 +929,7 @@ func TestAdaptorHandleArbitraryToolchainSupport(t *testing.T) {
 	if action == nil {
 		t.Fatalf("gotAction is nil")
 	}
-	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.DefaultInstance(), ".", action.InputRootDigest)
+	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.Instance(), ".", action.InputRootDigest)
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -949,7 +949,7 @@ func TestAdaptorHandleArbitraryToolchainSupport(t *testing.T) {
 		}
 	}
 
-	if got, want := files["out/Release/run.sh"].digest, digest.Bytes("relocatable-wrapper-script", []byte(relocatableWrapperScript)).Digest(); !proto.Equal(got, want) {
+	if got, want := files["out/Release/run.sh"].digest, digest.Bytes("wrapper-script", []byte(wrapperScript)).Digest(); !proto.Equal(got, want) {
 		t.Errorf("digest of out/Release/run.sh: %s != %s", got, want)
 	}
 }
@@ -1076,7 +1076,7 @@ func TestAdaptorHandleArbitraryToolchainSupportNonRelocatable(t *testing.T) {
 	if action == nil {
 		t.Fatalf("gotAction is nil")
 	}
-	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.DefaultInstance(), ".", action.InputRootDigest)
+	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.Instance(), ".", action.InputRootDigest)
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -1096,7 +1096,7 @@ func TestAdaptorHandleArbitraryToolchainSupportNonRelocatable(t *testing.T) {
 		}
 	}
 
-	if got, want := files["out/Debug/run.sh"].digest, digest.Bytes("wrapper-script", []byte(relocatableWrapperScript)).Digest(); !proto.Equal(got, want) {
+	if got, want := files["out/Debug/run.sh"].digest, digest.Bytes("wrapper-script", []byte(wrapperScript)).Digest(); !proto.Equal(got, want) {
 		t.Errorf("digest of out/Debug/run.sh: %s != %s", got, want)
 	}
 }
@@ -1184,5 +1184,120 @@ func TestAdapterDockerProperties(t *testing.T) {
 				t.Errorf("platform.Properties diff want->got\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestAdapterNsjailHardening(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cluster := &fakeCluster{
+		rbe: newFakeRBE(),
+	}
+	err := cluster.setup(ctx, cluster.rbe.instancePrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cluster.teardown()
+	clang := newFakeClang(&cluster.cmdStorage, "1234", "x86-64-linux-gnu")
+	err = cluster.pushToolchains(ctx, clang)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var localFiles fakeLocalFiles
+	localFiles.Add("/b/c/w/src/hello.cc", randomSize())
+
+	req := &gomapb.ExecReq{
+		CommandSpec: clang.CommandSpec("clang", "bin/clang"),
+		Arg:         []string{"bin/clang", "-c", "../../src/hello.cc"},
+		Env:         []string{},
+		Cwd:         proto.String("/b/c/w/out/Release"),
+		Input: []*gomapb.ExecReq_Input{
+			localFiles.mustInput(ctx, t, cluster.adapter.GomaFile, "/b/c/w/src/hello.cc", "../../src/hello.cc"),
+		},
+		Subprogram:    []*gomapb.SubprogramSpec{},
+		RequesterInfo: &gomapb.RequesterInfo{},
+		HermeticMode:  proto.Bool(true),
+	}
+
+	cluster.adapter.HardeningRatio = 1.0
+	cluster.adapter.NsjailRatio = 1.0
+
+	resp, err := cluster.adapter.Exec(ctx, req)
+	if err != nil {
+		t.Fatalf("Exec(ctx, req)=%v; %v; want nil error", resp, err)
+	}
+	if resp.GetError() != gomapb.ExecResp_OK {
+		t.Errorf("Exec error=%v; want=%v", resp.GetError(), gomapb.ExecResp_OK)
+	}
+
+	command := cluster.rbe.gotCommand
+	if command == nil {
+		t.Fatalf("gotCommand is nil")
+	}
+	wantArgs := []string{
+		"out/Release/run.sh",
+		"bin/clang", "-c", "../../src/hello.cc",
+	}
+	if diff := cmp.Diff(wantArgs, command.Arguments); diff != "" {
+		t.Errorf("arguments diff want->got\n%s", diff)
+	}
+	if command.WorkingDirectory != "" {
+		t.Errorf(`command.WorkingDirectory=%q; want=""`, command.WorkingDirectory)
+	}
+	workDirExists := false
+	wantWorkDir := "out/Release"
+	for _, v := range command.EnvironmentVariables {
+		if v.Name == "WORK_DIR" {
+			workDirExists = true
+			if v.Value != wantWorkDir {
+				t.Errorf("WORK_DIR=%q; want=%q", v.Value, wantWorkDir)
+			}
+		}
+	}
+
+	if !workDirExists {
+		t.Errorf("WORK_DIR not found")
+	}
+
+	action := cluster.rbe.gotAction
+	if action == nil {
+		t.Fatal("gotAction is nil")
+	}
+	files, err := dumpDir(ctx, t, cluster.adapter.Client, cluster.adapter.Instance(), ".", action.InputRootDigest)
+	if err != nil {
+		t.Fatalf("dumpDir err:%v", err)
+	}
+	runsh, exists := files["out/Release/run.sh"]
+	if !exists {
+		t.Errorf("out/Release/run.sh doesn't exist")
+	} else if !runsh.isExecutable {
+		t.Errorf("out/Release/run.sh is not executable")
+	} else if want := digest.Bytes("run.sh", []byte(nsjailHardeningWrapperScript)).Digest(); !proto.Equal(runsh.digest, want) {
+		t.Errorf("out/Release/run.sh digest=%s; want=%s", runsh.digest, want)
+	}
+	nsjailCfg, exists := files["out/Release/nsjail.cfg"]
+	if !exists {
+		t.Errorf("out/Release/nsjail.cfg doesn't exist")
+	} else if want := digest.Bytes("nsjail.cfg", []byte(nsjailHardeningConfig)).Digest(); !proto.Equal(nsjailCfg.digest, want) {
+		t.Errorf("out/Release/nsjail.cfg digest=%s; want=%s", nsjailCfg.digest, want)
+	}
+
+	var wantProps []*rpb.Platform_Property
+	for _, p := range clang.RemoteexecPlatform.Properties {
+		wantProps = append(wantProps, &rpb.Platform_Property{
+			Name:  p.Name,
+			Value: p.Value,
+		})
+	}
+	wantProps = append(wantProps, &rpb.Platform_Property{
+		Name:  "dockerPrivileged",
+		Value: "true",
+	})
+	sort.Slice(wantProps, func(i, j int) bool {
+		return wantProps[i].Name < wantProps[j].Name
+	})
+	if diff := cmp.Diff(wantProps, command.Platform.GetProperties(), cmp.Comparer(proto.Equal)); diff != "" {
+		t.Errorf("platform.Properties diff want->got\n%s", diff)
 	}
 }

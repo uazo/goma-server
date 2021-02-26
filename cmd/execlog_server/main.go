@@ -13,6 +13,7 @@ import (
 	"flag"
 	"net/http"
 
+	"go.opencensus.io/stats/view"
 	"go.opencensus.io/trace"
 	"go.opencensus.io/zpages"
 	"google.golang.org/grpc"
@@ -45,6 +46,11 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
+	err = view.Register(execlog.DefaultViews...)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
 	trace.ApplyConfig(trace.Config{
 		DefaultSampler: server.NewLimitedSampler(server.DefaultTraceFraction, server.DefaultTraceQPS),
 	})

@@ -350,7 +350,7 @@ func TestInputFiles(t *testing.T) {
 					Data:     digest.Bytes(input.GetFilename(), input.Content.GetContent()),
 				},
 			},
-			uploaded: input.Content != nil,
+			needUpload: input.Content != nil,
 		}
 	}
 

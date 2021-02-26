@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	rpb "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -66,8 +67,9 @@ var (
 	pubsubProjectID    = flag.String("pubsub-project-id", "", "project id for pubsub")
 	serviceAccountFile = flag.String("service-account-file", "", "service account json file")
 
-	remoteexecAddr       = flag.String("remoteexec-addr", "", "use remoteexec API endpoint")
-	remoteInstancePrefix = flag.String("remote-instance-prefix", "", "remote instance name path prefix.")
+	remoteexecAddr         = flag.String("remoteexec-addr", "", "use remoteexec API endpoint")
+	remoteInstancePrefix   = flag.String("remote-instance-prefix", "", "remote instance name path prefix.")
+	remoteInstanceBaseName = flag.String("remote-instance-basename", "default_instance", "remote instance basename under remote-instance-prefix")
 
 	// http://b/141901653
 	execMaxRetryCount = flag.Int("exec-max-retry-count", 5, "max retry count for exec call. 0 is unlimited count, but bound to ctx timtout. Use small number for powerful clients to run local fallback quickly. Use large number for powerless clients to use remote more than local.")
@@ -84,7 +86,33 @@ var (
 	// rbe-staging1 uses 2.2M keys (< 512MB memory usage in redis).
 	maxDigestCacheEntries = flag.Int("max-digest-cache-entries", 2e6, "maximum entries in in-memory digest cache. 0 means unimited")
 
+	// nsjail is applied in hardened request.
+	// note windows and chroot reqs are out of scope for the ratio.
+	// e.g.
+	//   hadening-ratio=0
+	//   nsjail-rario=<any>
+	//   => no hardening (no runsc nor nsjail) at all
+	//
+	//   hardening-ratio=1
+	//   nsjail-ratio=0
+	//   => hardening by runsc only
+	//
+	//   hardening-ratio=1
+	//   nsjail-ratio=1
+	//   => hardening by nsjail only
+	//
+	//   hardening-ratio=0.5
+	//   nsjail-ratio=0.5
+	//   => no hardeing 50%
+	//      hardening 50%
+	//        nsjail 25%  (50% in hardening)
+	//        runsc 25%   (50% in hardening)
 	experimentHardeningRatio = flag.Float64("experiment-hardening-ratio", 0, "Ratio [0,1] to enable hardening. 0=no hardening. 1=all hardening.")
+	experimentNsjailRatio    = flag.Float64("experiment-nsjail-ratio", 0, "Ratio [0,1] to use nsjail for hardening. 0=no nsjial (ie. runsc), 1=all nsjail.")
+	disableHardenings        = flag.String("disable-hardenings", "", "comma separated sha256 file hashes of command to disable hardening (i.e. for ELF-32)")
+
+	redisMaxIdleConns   = flag.Int("redis-max-idle-conns", redis.DefaultMaxIdleConns, "maximum number of idle connections to redis.")
+	redisMaxActiveConns = flag.Int("redis-max-active-conns", redis.DefaultMaxActiveConns, "maximum number of active connections to redis.")
 )
 
 var (
@@ -280,11 +308,24 @@ func newDigestCache(ctx context.Context) remoteexec.DigestCache {
 		logger.Warnf("redis disabled for gomafile-digest: %v", err)
 		return digest.NewCache(nil, *maxDigestCacheEntries)
 	}
-	logger.Infof("redis enabled for gomafile-digest: %v", addr)
-	return digest.NewCache(redis.NewClient(ctx, addr, "gomafile-digest:"), *maxDigestCacheEntries)
+	logger.Infof("redis enabled for gomafile-digest: %v idle=%d active=%d", addr, *redisMaxIdleConns, *redisMaxActiveConns)
+	return digest.NewCache(redis.NewClient(ctx, addr, redis.Opts{
+		Prefix:         "gomafile-digest:",
+		MaxIdleConns:   *redisMaxIdleConns,
+		MaxActiveConns: *redisMaxActiveConns,
+	}), *maxDigestCacheEntries)
 }
 
 func main() {
+	spanTimeout := remoteexec.DefaultSpanTimeout
+	flag.DurationVar(&spanTimeout.Inventory, "exec-inventory-timeout", spanTimeout.Inventory, "timeout of exec-inventory")
+	flag.DurationVar(&spanTimeout.InputTree, "exec-input-tree-timeout", spanTimeout.InputTree, "timeout of exec-iput-tree")
+	flag.DurationVar(&spanTimeout.Setup, "exec-setup-timeout", spanTimeout.Setup, "timeout of exec-setup")
+	flag.DurationVar(&spanTimeout.CheckCache, "exec-check-cache-timeout", spanTimeout.CheckCache, "timeout of exec-check-cache")
+	flag.DurationVar(&spanTimeout.CheckMissing, "exec-check-missing-timeout", spanTimeout.CheckMissing, "timeout of exec-check-missing")
+	flag.DurationVar(&spanTimeout.UploadBlobs, "exec-upload-blobs-timeout", spanTimeout.UploadBlobs, "timeout of exec-upload-blobs")
+	flag.DurationVar(&spanTimeout.Execute, "exec-execute-timeout", spanTimeout.Execute, "timeout of exec-execute")
+	flag.DurationVar(&spanTimeout.Response, "exec-response-timeout", spanTimeout.Response, "timeout of exec-response")
 	flag.Parse()
 	rand.Seed(time.Now().UnixNano())
 
@@ -379,9 +420,12 @@ func main() {
 	}
 	casBlobLookupConcurrency := 20
 	outputFileConcurrency := 20
+	logger.Infof("span timeout = %#v", spanTimeout)
 	re := &remoteexec.Adapter{
-		InstancePrefix: *remoteInstancePrefix,
-		ExecTimeout:    15 * time.Minute,
+		InstancePrefix:   *remoteInstancePrefix,
+		InstanceBaseName: *remoteInstanceBaseName,
+		ExecTimeout:      15 * time.Minute,
+		SpanTimeout:      spanTimeout,
 		Client: remoteexec.Client{
 			ClientConn: reConn,
 			Retry: rpc.Retry{
@@ -398,7 +442,10 @@ func main() {
 		CASBlobLookupSema: make(chan struct{}, casBlobLookupConcurrency),
 		OutputFileSema:    make(chan struct{}, outputFileConcurrency),
 		HardeningRatio:    *experimentHardeningRatio,
+		NsjailRatio:       *experimentNsjailRatio,
+		DisableHardenings: strings.Split(*disableHardenings, ","),
 	}
+	logger.Infof("hardeniong=%f nsjail=%f", re.HardeningRatio, re.NsjailRatio)
 
 	if *cmdFilesBucket == "" {
 		logger.Warnf("--cmd-files-bucket is not given. support only ARBITRARY_TOOLCHAIN_SUPPORT enabled client")
@@ -414,7 +461,7 @@ func main() {
 	// expose bytestream proxy.
 	bs := &remoteexec.ByteStream{
 		Adapter:      re,
-		InstanceName: re.DefaultInstance(),
+		InstanceName: re.Instance(),
 		// TODO: Create bytestreams for multiple instances.
 	}
 	bspb.RegisterByteStreamServer(s.Server, bs)

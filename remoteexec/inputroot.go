@@ -58,6 +58,59 @@ func argv0InInputRoot(argv0 string) bool {
 	return true
 }
 
+func sysrootDir(args []string) (string, bool) {
+	// https://github.com/llvm/llvm-project/blob/1d99472875100b230bac2d9ea70b5cd4b45e788b/clang/include/clang/Driver/Options.td
+	//  def isysroot : JoinedOrSeparate<["-"], "isysroot">, Group<clang_i_Group>, Flags<[CC1Option]>,
+	//     HelpText<"Set the system root directory (usually /)">, MetaVarName<"<dir>">;
+	//  def _sysroot_EQ : Joined<["--"], "sysroot=">;
+	//  def _sysroot : Separate<["--"], "sysroot">, Alias<_sysroot_EQ>;
+	var sysrootDir, isysrootDir string
+	var sysrootFlag, isysrootFlag bool
+	// https://releases.llvm.org/10.0.0/tools/clang/docs/DiagnosticsReference.html#wmissing-sysroot
+	// enabled by default
+	need := true
+	for _, arg := range args {
+		if sysrootFlag {
+			// separated, next arg of --sysroot
+			sysrootDir = arg
+			sysrootFlag = false
+			continue
+		}
+		if isysrootFlag {
+			// separated, next arg of -isysroot
+			isysrootDir = arg
+			isysrootFlag = false
+			continue
+		}
+		switch arg {
+		case "-Wall", "-Wmissing-sysroot":
+			need = true
+		case "-Wno-missing-sysroot":
+			need = false
+		case "-isysroot":
+			isysrootFlag = true
+		case "--sysroot":
+			sysrootFlag = true
+		default:
+			// handled joined.
+			switch {
+			case strings.HasPrefix(arg, "-isysroot"):
+				isysrootDir = strings.TrimPrefix(arg, "-isysroot")
+			case strings.HasPrefix(arg, "--sysroot="):
+				sysrootDir = strings.TrimPrefix(arg, "--sysroot=")
+			}
+		}
+	}
+	// https://gcc.gnu.org/onlinedocs/gcc/Directory-Options.html
+	// If you use both this option and the -isysroot option, then
+	// the --sysroot option applies to libraries, but the
+	// -isysroot option applies to header files.
+	if isysrootDir != "" {
+		return isysrootDir, need
+	}
+	return sysrootDir, need
+}
+
 func inputPaths(filepath clientFilePath, req *gomapb.ExecReq, argv0 string) ([]string, error) {
 	cwd := filepath.Clean(req.GetCwd())
 	if !filepath.IsAbs(cwd) {
@@ -77,23 +130,23 @@ func inputPaths(filepath clientFilePath, req *gomapb.ExecReq, argv0 string) ([]s
 		}
 		paths = append(paths, filepath.Clean(argv0))
 	}
-	for _, dir := range req.GetCommandSpec().GetCxxSystemIncludePath() {
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
+	sysrootDir, need := sysrootDir(req.Arg)
+	// if missing sysroot is allowed, no need to ensure it
+	if need && sysrootDir != "" {
+		// if request not allows missing sysroot, we
+		// need to create the directory even if no input files
+		// in dir are used. b/150421328
+
+		// allow relative path only.
+		// if dir is absolute, request would require
+		// InputRootAbsolutePath.
+		// TODO: cwdAgnosticReq should check input file path too.
+		// http://b/167342635
+		// http://crbug.com/1123938
+		if !filepath.IsAbs(sysrootDir) {
+			dir := filepath.Join(cwd, sysrootDir)
+			paths = append(paths, filepath.Clean(dir))
 		}
-		paths = append(paths, filepath.Clean(dir))
-	}
-	for _, dir := range req.GetCommandSpec().GetSystemIncludePath() {
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
-		}
-		paths = append(paths, filepath.Clean(dir))
-	}
-	for _, dir := range req.GetCommandSpec().GetSystemFrameworkPath() {
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
-		}
-		paths = append(paths, filepath.Clean(dir))
 	}
 	return paths, nil
 }
@@ -178,9 +231,13 @@ func checkInputRootDir(filepath clientFilePath, dir string) error {
 }
 
 // inputRootDir returns common root of paths.
+// if execRootDir is not empty, use it as root of paths.
 // If second return value is true, chroot must be used.  It become true only
 // if `allowChroot` is true and common input root is "/".
-func inputRootDir(filepath clientFilePath, paths []string, allowChroot bool) (string, bool, error) {
+func inputRootDir(filepath clientFilePath, paths []string, allowChroot bool, execRootDir string) (string, bool, error) {
+	if execRootDir != "" {
+		return execRootDir, execRootDir == "/" && allowChroot, nil
+	}
 	root := commonDir(filepath, paths)
 	if needChroot(filepath, root) && allowChroot {
 		switch filepath.(type) {

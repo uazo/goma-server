@@ -28,7 +28,7 @@ func fromBackendMapping(ctx context.Context, cfg *pb.BackendMapping, opt Option)
 	case *pb.BackendMapping_Remote:
 		return FromRemoteBackend(ctx, be.Remote, opt)
 	case nil:
-		return nil, func() {}, fmt.Errorf("no backend for %s", groupId)
+		return nil, func() {}, fmt.Errorf("no backend for group:%q", groupId)
 	default:
 		return nil, func() {}, fmt.Errorf("unknown type in %s: %T", groupId, cfg.Backend)
 	}
@@ -169,7 +169,7 @@ func (m Mixer) dispatcher(handler func(Backend) http.Handler) http.Handler {
 		q := req.URL.Query()
 		backend, found := m.selectBackend(ctx, user.Group, q)
 		if !found {
-			logger.Errorf("no backend config for %s %s", user.Group, q.Encode())
+			logger.Errorf("no backend config for group:%q query:%q", user.Group, q.Encode())
 			http.Error(w, "no backend config", http.StatusInternalServerError)
 			return
 		}

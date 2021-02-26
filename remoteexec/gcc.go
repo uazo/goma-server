@@ -10,21 +10,23 @@ import (
 	"strings"
 )
 
+// longest first
 var pathFlags = []string{
-	"--sysroot=",
-	"-B",
-	"-I",
 	"-fcrash-diagnostics-dir=",
-	"-fprofile-instr-use=",
 	"-fprofile-sample-use=",
 	"-fsanitize-blacklist=",
+	"-fprofile-instr-use=",
+	"-resource-dir=",
 	"--include=",
+	"--sysroot=",
 	"--include",
 	"-include=",
 	"-include",
 	"-isystem",
 	"-o",
-	"-resource-dir=",
+	"-B",
+	"-F",
+	"-I",
 }
 
 // TODO: share exec/gcc.go ?
@@ -153,6 +155,7 @@ Loop:
 		case strings.HasPrefix(arg, "-m"):
 			// -m64, -march=x86-64
 		case arg == "-arch":
+		case arg == "-target":
 		case strings.HasPrefix(arg, "--target="):
 
 		case strings.HasPrefix(arg, "-no"):
@@ -172,17 +175,19 @@ Loop:
 
 		case arg == "-o":
 			pathFlag = true
-		case arg == "-I" || arg == "-B" || arg == "-isystem" || arg == "-include":
+		case arg == "-I" || arg == "-B" || arg == "-F" || arg == "-isystem" || arg == "-include":
 			pathFlag = true
 		case arg == "-MF":
 			pathFlag = true
 		case arg == "-isysroot":
 			pathFlag = true
+		case arg == "--sysroot":
+			pathFlag = true
 		case arg == "-idirafter":
 			pathFlag = true
 
 		case strings.HasPrefix(arg, "-"): // unknown flag?
-			return fmt.Errorf("unknown flag: %s", arg)
+			return unknownFlagError{arg: arg}
 
 		default: // input file?
 			if filepath.IsAbs(arg) {
@@ -207,8 +212,13 @@ Loop:
 				if err != nil {
 					return err
 				}
+			case "as":
+				err := asArgRelocatable(filepath, args)
+				if err != nil {
+					return err
+				}
 			default:
-				return fmt.Errorf("unsupported subcommand args %s: %s", cmd, args)
+				return unknownFlagError{arg: fmt.Sprintf("unsupported subcommand %s: %s", cmd, args)}
 			}
 		}
 	}
@@ -250,7 +260,7 @@ func clangArgRelocatable(filepath clientFilePath, args []string) error {
 			pathFlag = true
 		case strings.HasPrefix(arg, "-debug-info-kind="):
 		default:
-			return fmt.Errorf("clang unknown arg: %s", arg)
+			return unknownFlagError{arg: fmt.Sprintf("clang: %s", arg)}
 		}
 	}
 	return nil
@@ -297,7 +307,20 @@ func llvmArgRelocatable(filepath clientFilePath, args []string) error {
 			// doesn't take a path related value.
 
 		default:
-			return fmt.Errorf("llvm unknown arg: %s", arg)
+			return unknownFlagError{arg: fmt.Sprintf("llvm: %s", arg)}
+		}
+	}
+	return nil
+}
+
+func asArgRelocatable(filepath clientFilePath, args []string) error {
+	for _, arg := range args {
+		switch {
+		case arg == "--fatal-warnings":
+			// b/173641495
+			// https://github.com/llvm/llvm-project/blob/ffc5d98d2c0df5f72ce67e5dcb724b64f03f639b/llvm/lib/MC/MCTargetOptionsCommandFlags.cpp
+		default:
+			return unknownFlagError{arg: fmt.Sprintf("as: %s", arg)}
 		}
 	}
 	return nil

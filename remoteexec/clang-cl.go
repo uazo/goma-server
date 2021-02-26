@@ -5,6 +5,7 @@
 package remoteexec
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,20 +13,24 @@ import (
 
 // TODO: share exec/clangcl.go ?
 
+// longest first
 var clangClPathFlags = []string{
-	"--sysroot=",
-	"-B",
-	"-I",
 	"-fcrash-diagnostics-dir=",
-	"-fprofile-instr-use=",
 	"-fprofile-sample-use=",
 	"-fsanitize-blacklist=",
+	"-fprofile-instr-use=",
+	"-resource-dir=",
+	"/vctoolsdir",
+	"/winsysroot",
+	"/winsdkdir",
+	"--sysroot=",
 	"-include=",
 	"-isystem",
-	"-o",
-	"-resource-dir=",
 	"-imsvc",
 	"/FA",
+	"/FI",
+	"/FR",
+	"/FU",
 	"/Fa",
 	"/Fd",
 	"/Fe",
@@ -33,10 +38,11 @@ var clangClPathFlags = []string{
 	"/Fm",
 	"/Fo",
 	"/Fp",
-	"/FR",
 	"/Fr",
-	"/FU",
 	"/Fx",
+	"-B",
+	"-I",
+	"-o",
 }
 
 func isClangclWarningFlag(arg string) bool {
@@ -223,8 +229,11 @@ Loop:
 		case isClangclOptimizationFlag(arg): // Flags to handle optimization
 			continue
 
+		case arg == "/FC": // Display full path of source code files passed to cl.exe in diagnostic text.
+			return errors.New("need full path of soruce code for /FC")
+
 		case strings.HasPrefix(arg, "-"), strings.HasPrefix(arg, "/"): // unknown flag?
-			return fmt.Errorf("unknown flag: %s", arg)
+			return unknownFlagError{arg: arg}
 
 		default: // input file?
 			if filepath.IsAbs(arg) {
@@ -252,18 +261,12 @@ Loop:
 		}
 	}
 
-	for _, env := range envs {
-		e := strings.SplitN(env, "=", 2)
-		if len(e) != 2 {
-			return fmt.Errorf("bad environment variable: %s", env)
-		}
-		if e[0] == "PWD" {
-			continue
-		}
-		if filepath.IsAbs(e[1]) {
-			return fmt.Errorf("abs path in env %s=%s", e[0], e[1])
-		}
-	}
+	// Don't check environment variables.
+	// Typically user sets `INCLUDE=C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\VC\Tools\MSVC\14.16.27023\ATLMFC\include;...`
+	// so it makes always non-relocatble.
+	// in chromium build, cang-cl uses -imsvc instead of relying on
+	// %INCLUDE%, so it would be ok to ignore environment variables.
+	// http://b/173755650
 	return nil
 }
 
@@ -289,7 +292,7 @@ func clangclArgRelocatable(filepath clientFilePath, args []string) error {
 			skipFlag = true
 			continue
 		default:
-			return fmt.Errorf("clang-cl unknown arg: %s", arg)
+			return unknownFlagError{arg: fmt.Sprintf("clang-cl: %s", arg)}
 		}
 	}
 	return nil

@@ -160,6 +160,7 @@ func TestInputRootDir(t *testing.T) {
 		req         *gomapb.ExecReq
 		argv0       string
 		allowChroot bool
+		execRoot    string
 		want        string
 		wantChroot  bool
 		wantPathErr bool
@@ -183,6 +184,29 @@ func TestInputRootDir(t *testing.T) {
 			},
 			argv0: "../../third_party/llvm-build/Release+Asserts/bin/clang++",
 			want:  "/b/c/b/linux/src",
+		},
+		{
+			desc: "execRoot",
+			req: &gomapb.ExecReq{
+				Cwd: proto.String("/b/c/b/linux/src/out/Release"),
+				Input: []*gomapb.ExecReq_Input{
+					{
+						Filename: proto.String("../../base/logging.h"),
+					},
+					{
+						Filename: proto.String("../../build/linux/debian_sid_amd64-sysroot/usr/include/stdio.h"),
+					},
+					{
+						Filename: proto.String("gen/chrome/common/buildflags.h"),
+					},
+					{
+						Filename: proto.String("/usr/include/stdio.h"),
+					},
+				},
+			},
+			argv0:    "../../third_party/llvm-build/Release+Asserts/bin/clang++",
+			execRoot: "/b/c/b/linux/src",
+			want:     "/b/c/b/linux/src",
 		},
 		{
 			desc: "abs input path",
@@ -332,6 +356,34 @@ func TestInputRootDir(t *testing.T) {
 			allowChroot: true,
 			wantChroot:  true,
 		},
+		{
+			desc: "--sysroot=, but ignore system include paths",
+			req: &gomapb.ExecReq{
+				Arg: []string{
+					"../../third_party/llvm-build/Release+Asserts/bin/clang++",
+					"-Wall",
+					"-Werror",
+					"--sysroot=../../build/linux/debian_sid_amd64-sysroot",
+				},
+				Cwd: proto.String("/b/c/b/chromeos/src/out/Release"),
+				Input: []*gomapb.ExecReq_Input{
+					{
+						Filename: proto.String("../../base/logging.h"),
+					},
+					{
+						Filename: proto.String("gen/chrome/common/buildflags.h"),
+					},
+				},
+				CommandSpec: &gomapb.CommandSpec{
+					SystemIncludePath: []string{
+						"../../build/linux/debian_sid_amd64-sysroot/usr/include",
+						"/usr/include",
+					},
+				},
+			},
+			argv0: "../../third_party/llvm-build/Release+Asserts/bin/clang++",
+			want:  "/b/c/b/chromeos/src",
+		},
 	} {
 		t.Logf("test case: %s", tc.desc)
 		paths, err := inputPaths(posixpath.FilePath{}, tc.req, tc.argv0)
@@ -345,7 +397,7 @@ func TestInputRootDir(t *testing.T) {
 		if err != nil {
 			t.Errorf("inputPaths(req, %q)=%v, %v; want nil error", tc.argv0, paths, err)
 		}
-		got, needChroot, err := inputRootDir(posixpath.FilePath{}, paths, tc.allowChroot)
+		got, needChroot, err := inputRootDir(posixpath.FilePath{}, paths, tc.allowChroot, tc.execRoot)
 		if tc.wantRootErr {
 			if err == nil {
 				t.Errorf("inputRootDir(files)=%v, %t, nil; want err", got, needChroot)

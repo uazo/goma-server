@@ -12,6 +12,16 @@ import (
 	"go.chromium.org/goma/server/command/descriptor/winpath"
 )
 
+func TestCLangCLPathFlags(t *testing.T) {
+	lastP := clangClPathFlags[0]
+	for _, p := range clangClPathFlags[1:] {
+		if len(lastP) < len(p) {
+			t.Errorf("%q is longer than %q", p, lastP)
+		}
+		lastP = p
+	}
+}
+
 func TestIsClangclWarningFlag(t *testing.T) {
 	for _, tc := range []struct {
 		desc  string
@@ -222,6 +232,60 @@ func TestClangclRelocatableReq(t *testing.T) {
 			args: append(append([]string{}, baseReleaseArgs...),
 				"-mllvm", "-basic-aa-recphi=0"),
 			relocatable: true,
+		},
+		{
+			desc: "/FIcompat/msvcrt/snprintf.h",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"/FIcompat/msvcrt/snprintf.h"),
+			relocatable: true,
+		},
+		{
+			desc: `/FIC:\winsdk\compat\msvcrt\snprintf.h`,
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/FIC:\winsdk\compat\msvcrt\snprintf.h`),
+			relocatable: false,
+		},
+		{
+			desc: "/FC",
+			args: append(append([]string{}, baseReleaseArgs...),
+				"/FC"),
+			relocatable: false,
+		},
+		{
+			desc: "/winsysroot relative",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/winsysroot..\..\third_party\depot_tools\win_toolchain\vs_files\20d5f253f`),
+			relocatable: true,
+		},
+		{
+			desc: "/winsysroot absolute",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/winsysrootC:\src\chromium\src\third_party\depot_tools\win_toolchain\vs_files\20d5f253f`),
+			relocatable: false,
+		},
+		{
+			desc: "/vctoolsdir relative",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/vctoolsdir..\..\third_party\depot_tools\win_toolchain\vs_files\20d5f253f\VC\Tools`),
+			relocatable: true,
+		},
+		{
+			desc: "/vctoolsdir absolute",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/vctoolsdirC:\src\chromium\src\third_party\depot_tools\win_toolchain\vs_files\20d5f253f\VC\Tools`),
+			relocatable: false,
+		},
+		{
+			desc: "/winsdkdir relative",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/winsdkdir..\..\third_party\depot_tools\win_toolchain\vs_files\20d5f253f\win_sdk`),
+			relocatable: true,
+		},
+		{
+			desc: "/winsdkdir absolute",
+			args: append(append([]string{}, baseReleaseArgs...),
+				`/winsdkdirC:\src\chromium\src\third_party\depot_tools\win_toolchain\vs_files\20d5f253f\win_sdk`),
+			relocatable: false,
 		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {

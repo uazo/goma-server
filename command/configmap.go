@@ -516,6 +516,7 @@ func (c *ConfigLoader) Load(ctx context.Context, uri string, rc *cmdpb.RuntimeCo
 		confs = append(confs, &cmdpb.Config{
 			RemoteexecPlatform: platform,
 			Dimensions:         rc.PlatformRuntimeConfig.Dimensions,
+			Acl:                rc.Acl,
 		})
 	}
 
@@ -768,6 +769,7 @@ func loadConfigs(ctx context.Context, client stiface.Client, uri string, rc *cmd
 				},
 				CmdDescriptor:      d,
 				RemoteexecPlatform: platform,
+				Acl:                rc.Acl,
 			}
 			return nil
 		})

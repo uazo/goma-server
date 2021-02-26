@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"go.chromium.org/goma/server/auth"
 	"go.chromium.org/goma/server/auth/account"
@@ -118,6 +119,11 @@ func (c *Checker) CheckToken(ctx context.Context, token *oauth2.Token, tokenInfo
 		}
 		logger.Debugf("group:%s use service account:%s", g.Id, g.ServiceAccount)
 		return g.Id, saToken, nil
+	}
+	if ctx.Err() != nil {
+		err := status.FromContextError(ctx.Err()).Err()
+		logger.Errorf("acl check context error: %v", err)
+		return "", nil, err
 	}
 	logger.Errorf("no acl match")
 	return "", nil, grpc.Errorf(codes.PermissionDenied, "access rejected")

@@ -7,6 +7,7 @@ package remoteexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"path"
@@ -172,7 +173,7 @@ func (r *request) Err() error {
 func (r *request) instanceName() string {
 	basename := r.cmdConfig.GetRemoteexecPlatform().GetRbeInstanceBasename()
 	if basename == "" {
-		return r.f.DefaultInstance()
+		return r.f.Instance()
 	}
 	return path.Join(r.f.InstancePrefix, basename)
 }
@@ -210,9 +211,34 @@ func (r *request) getInventoryData(ctx context.Context) *gomapb.ExecResp {
 	for _, prop := range cmdConfig.GetRemoteexecPlatform().GetProperties() {
 		r.addPlatformProperty(ctx, prop.Name, prop.Value)
 	}
+	if len(r.gomaReq.GetRequesterInfo().GetPlatformProperties()) > 0 {
+		for _, pp := range r.gomaReq.GetRequesterInfo().GetPlatformProperties() {
+			if !isSafePlatformProperty(pp.GetName(), pp.GetValue()) {
+				logger.Errorf("unsafe user platform property: %v", pp)
+				r.gomaResp.Error = gomapb.ExecResp_BAD_REQUEST.Enum()
+				r.gomaResp.ErrorMessage = append(r.gomaResp.ErrorMessage, fmt.Sprintf("unsafe platform property: %v", pp))
+				continue
+			}
+			logger.Infof("override by user platform property: %v", pp)
+			r.addPlatformProperty(ctx, pp.GetName(), pp.GetValue())
+		}
+		if len(r.gomaResp.ErrorMessage) > 0 {
+			return r.gomaResp
+		}
+	}
 	r.allowChroot = cmdConfig.GetRemoteexecPlatform().GetHasNsjail()
 	logger.Infof("platform: %s, allowChroot=%t", r.platform, r.allowChroot)
 	return nil
+}
+
+func isSafePlatformProperty(name, value string) bool {
+	switch name {
+	case "container-image", "InputRootAbsolutePath", "cache-silo":
+		return true
+	case "dockerRuntime":
+		return value == "runsc"
+	}
+	return false
 }
 
 func (r *request) addPlatformProperty(ctx context.Context, name, value string) {
@@ -354,7 +380,7 @@ type inputFileResult struct {
 	missingInput  string
 	missingReason string
 	file          merkletree.Entry
-	uploaded      bool
+	needUpload    bool
 	err           error
 }
 
@@ -397,7 +423,7 @@ func inputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInpu
 			if input.Content == nil {
 				return
 			}
-			result.uploaded = true
+			result.needUpload = true
 		}(input, &results[i])
 	}
 	wg.Wait()
@@ -408,6 +434,7 @@ func inputFiles(ctx context.Context, inputs []*gomapb.ExecReq_Input, gi gomaInpu
 // it returns non-nil ExecResp for:
 // - missing inputs
 // - input root detection failed
+// - non-relative and non C: drive on windows.
 func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	if r.err != nil {
 		return nil
@@ -423,7 +450,8 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 		r.gomaResp.ErrorMessage = append(r.gomaResp.ErrorMessage, fmt.Sprintf("bad input: %v", err))
 		return r.gomaResp
 	}
-	rootDir, needChroot, err := inputRootDir(r.filepath, inputPaths, r.allowChroot)
+	execRootDir := r.gomaReq.GetRequesterInfo().GetExecRoot()
+	rootDir, needChroot, err := inputRootDir(r.filepath, inputPaths, r.allowChroot, execRootDir)
 	if err != nil {
 		logger.Errorf("input root detection failed: %v", err)
 		logFileList(logger, "input paths", inputPaths)
@@ -434,7 +462,7 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	r.tree = merkletree.New(r.filepath, rootDir, r.digestStore)
 	r.needChroot = needChroot
 
-	logger.Infof("new input tree cwd:%s root:%s %s", r.gomaReq.GetCwd(), r.tree.RootDir(), r.cmdConfig.GetCmdDescriptor().GetSetup().GetPathType())
+	logger.Infof("new input tree cwd:%s root:%s execRoot:%s %s", r.gomaReq.GetCwd(), r.tree.RootDir(), execRootDir, r.cmdConfig.GetCmdDescriptor().GetSetup().GetPathType())
 	// If toolchain_included is true, r.gomaReq.Input and cmdFiles will contain the same files.
 	// To avoid dup, if it's added in r.gomaReq.Input, we don't add it as cmdFiles.
 	// While processing r.gomaReq.Input, we handle missing input, so the main routine is in
@@ -473,7 +501,7 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 		if r.err == nil && result.err != nil {
 			r.err = result.err
 		}
-		if result.uploaded {
+		if result.needUpload {
 			uploads = append(uploads, input)
 		}
 	}
@@ -483,14 +511,6 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	}
 	logger.Infof("inputFiles=%d uploads=%d in %s", len(r.gomaReq.Input), len(uploads), time.Since(start))
 
-	start = time.Now()
-	err = uploadInputFiles(ctx, uploads, r.input)
-	if err != nil {
-		r.err = err
-		return nil
-	}
-
-	var uploaded int
 	var files []merkletree.Entry
 	var missingInputs []string
 	var missingReason []string
@@ -500,13 +520,15 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 			missingReason = append(missingReason, in.missingReason)
 			continue
 		}
-		files = append(files, in.file)
-		if in.uploaded {
-			uploaded++
+		if in.file.Name == "" {
+			// ignore out of root files.
+			continue
 		}
+		files = append(files, in.file)
 	}
-	logger.Infof("upload %d inputs, missing %d inputs out of %d in %s", uploaded, len(missingInputs), len(r.gomaReq.Input), time.Since(start))
 	if len(missingInputs) > 0 {
+		logger.Infof("missing %d inputs out of %d. need to uploads=%d", len(missingInputs), len(r.gomaReq.Input), len(uploads))
+
 		r.gomaResp.MissingInput = missingInputs
 		r.gomaResp.MissingReason = missingReason
 		thinOutMissing(r.gomaResp, missingInputLimit)
@@ -518,6 +540,13 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	// create wrapper scripts
 	err = r.newWrapperScript(ctx, r.cmdConfig, r.cmdFiles[0].Path)
 	if err != nil {
+		var badReqErr badRequestError
+		if errors.As(err, &badReqErr) {
+			r.gomaResp.Error = gomapb.ExecResp_BAD_REQUEST.Enum()
+			r.gomaResp.ErrorMessage = append(r.gomaResp.ErrorMessage, badReqErr.Error())
+			return r.gomaResp
+		}
+		// otherwise, internal error.
 		r.err = fmt.Errorf("wrapper script: %v", err)
 		return nil
 	}
@@ -610,6 +639,15 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	logger.Infof("input root digest: %v", root)
 	r.action.InputRootDigest = root
 
+	// uploads embedded contents to file-server
+	// for the case the file was not yet uploaded to RBE CAS.
+	// even if client sends input with embedded content,
+	// the content may be already uploaded to RBE CAS,
+	// and uploaded content may not be needed,
+	// so we could ignore error of these uploads.
+	start = time.Now()
+	err = uploadInputFiles(ctx, uploads, r.input)
+	logger.Infof("upload %d inputs out of %d in %s: %v", len(uploads), len(r.gomaReq.Input), time.Since(start), err)
 	return nil
 }
 
@@ -644,7 +682,7 @@ const (
 	// TODO: use working_directory in action.
 	// need to fix output path to be relative to working_directory.
 	// http://b/113370588
-	relocatableWrapperScript = `#!/bin/bash
+	wrapperScript = `#!/bin/bash
 set -e
 if [[ "$WORK_DIR" != "" ]]; then
   cd "${WORK_DIR}"
@@ -652,6 +690,14 @@ fi
 exec "$@"
 `
 )
+
+type badRequestError struct {
+	err error
+}
+
+func (b badRequestError) Error() string {
+	return b.err.Error()
+}
 
 // TODO: put wrapper script in platform container?
 func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config, argv0 string) error {
@@ -662,7 +708,7 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 	cleanRootDir := r.filepath.Clean(r.tree.RootDir())
 	wd, err := rootRel(r.filepath, cwd, cleanCWD, cleanRootDir)
 	if err != nil {
-		return fmt.Errorf("bad cwd=%s: %v", cwd, err)
+		return badRequestError{err: fmt.Errorf("bad cwd=%s: %v", cwd, err)}
 	}
 	if wd == "" {
 		wd = "."
@@ -674,16 +720,12 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 	// However, only the first one is called in the command line.
 	// The other scripts should be called from the first wrapper script
 	// if needed.
-	type fileDesc struct {
-		name         string
-		data         digest.Data
-		isExecutable bool
-	}
-	var files []fileDesc
+	var files []merkletree.Entry
 
 	args := buildArgs(ctx, cmdConfig, argv0, r.gomaReq)
 	// TODO: only allow specific envs.
 
+	var relocatableErr error
 	wt := wrapperRelocatable
 	pathType := cmdConfig.GetCmdDescriptor().GetSetup().GetPathType()
 	switch pathType {
@@ -691,21 +733,22 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		if r.needChroot {
 			wt = wrapperNsjailChroot
 		} else {
-			err = relocatableReq(ctx, cmdConfig, r.filepath, r.gomaReq.Arg, r.gomaReq.Env)
-			if err != nil {
+			relocatableErr = relocatableReq(ctx, cmdConfig, r.filepath, r.gomaReq.Arg, r.gomaReq.Env)
+			if relocatableErr != nil {
 				wt = wrapperInputRootAbsolutePath
-				logger.Infof("non relocatable: %v", err)
+				logger.Infof("non relocatable: %v", relocatableErr)
 			}
 		}
 	case cmdpb.CmdDescriptor_WINDOWS:
-		err = relocatableReq(ctx, cmdConfig, r.filepath, r.gomaReq.Arg, r.gomaReq.Env)
-		if err != nil {
+		relocatableErr = relocatableReq(ctx, cmdConfig, r.filepath, r.gomaReq.Arg, r.gomaReq.Env)
+		if relocatableErr != nil {
 			wt = wrapperWinInputRootAbsolutePath
-			logger.Infof("non relocatable: %v", err)
+			logger.Infof("non relocatable: %v", relocatableErr)
 		} else {
 			wt = wrapperWin
 		}
 	default:
+		// internal error? maybe toolchain config is broken.
 		return fmt.Errorf("bad path type: %v", pathType)
 	}
 
@@ -717,44 +760,36 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		r.addPlatformProperty(ctx, "dockerPrivileged", "true")
 		// needed for chroot command and mount command.
 		r.addPlatformProperty(ctx, "dockerRunAsRoot", "true")
-		nsjailCfg := nsjailConfig(cwd, r.filepath, r.gomaReq.GetToolchainSpecs(), r.gomaReq.Env)
-		files = []fileDesc{
+		nsjailCfg := nsjailChrootConfig(cwd, r.filepath, r.gomaReq.GetToolchainSpecs(), r.gomaReq.Env)
+		files = []merkletree.Entry{
 			{
-				name:         posixWrapperName,
-				data:         digest.Bytes("nsjail-run-wrapper-script", []byte(nsjailRunWrapperScript)),
-				isExecutable: true,
+				Name:         posixWrapperName,
+				Data:         digest.Bytes("nsjail-chroot-run-wrapper-script", []byte(nsjailChrootRunWrapperScript)),
+				IsExecutable: true,
 			},
 			{
-				name: "nsjail.cfg",
-				data: digest.Bytes("nsjail-config-file", []byte(nsjailCfg)),
+				Name: "nsjail.cfg",
+				Data: digest.Bytes("nsjail-config-file", []byte(nsjailCfg)),
 			},
 		}
 	case wrapperInputRootAbsolutePath:
-		if rand.Float64() < r.f.HardeningRatio {
-			logger.Infof("run with InputRootAbsolutePath + runsc")
-			r.addPlatformProperty(ctx, "dockerRuntime", "runsc")
-		} else {
-			logger.Infof("run with InputRootAbsolutePath")
-		}
+		wrapperData := digest.Bytes("wrapper-script", []byte(wrapperScript))
+		files, wrapperData = r.maybeApplyHardening(ctx, "InputRootAbsolutePath", files, wrapperData)
 		// https://cloud.google.com/remote-build-execution/docs/remote-execution-properties#container_properties
 		r.addPlatformProperty(ctx, "InputRootAbsolutePath", r.tree.RootDir())
 		for _, e := range r.gomaReq.Env {
 			envs = append(envs, e)
 		}
-		files = []fileDesc{
+		files = append([]merkletree.Entry{
 			{
-				name:         posixWrapperName,
-				data:         digest.Bytes("relocatable-wrapper-script", []byte(relocatableWrapperScript)),
-				isExecutable: true,
+				Name:         posixWrapperName,
+				Data:         wrapperData,
+				IsExecutable: true,
 			},
-		}
+		}, files...)
 	case wrapperRelocatable:
-		if rand.Float64() < r.f.HardeningRatio {
-			logger.Infof("run with chdir + runsc: relocatable")
-			r.addPlatformProperty(ctx, "dockerRuntime", "runsc")
-		} else {
-			logger.Infof("run with chdir: relocatable")
-		}
+		wrapperData := digest.Bytes("wrapper-script", []byte(wrapperScript))
+		files, wrapperData = r.maybeApplyHardening(ctx, "chdir: relocatble", files, wrapperData)
 		for _, e := range r.gomaReq.Env {
 			if strings.HasPrefix(e, "PWD=") {
 				// PWD is usually absolute path.
@@ -764,32 +799,41 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 			}
 			envs = append(envs, e)
 		}
-		files = []fileDesc{
+		files = append([]merkletree.Entry{
 			{
-				name:         posixWrapperName,
-				data:         digest.Bytes("relocatable-wrapper-script", []byte(relocatableWrapperScript)),
-				isExecutable: true,
+				Name:         posixWrapperName,
+				Data:         wrapperData,
+				IsExecutable: true,
 			},
-		}
+		}, files...)
 	case wrapperWin:
 		logger.Infof("run on win")
 		wn, data, err := wrapperForWindows(ctx)
 		if err != nil {
+			// missing run.exe?
 			return err
 		}
-		files = []fileDesc{
+		// no need to set environment variables??
+		files = []merkletree.Entry{
 			{
-				name:         wn,
-				data:         data,
-				isExecutable: true,
+				Name:         wn,
+				Data:         data,
+				IsExecutable: true,
 			},
 		}
 	case wrapperWinInputRootAbsolutePath:
 		logger.Infof("run on win with InputRootAbsolutePath")
+		if relocatableErr != nil && !strings.HasPrefix(strings.ToUpper(r.tree.RootDir()), `C:\`) {
+			// TODO Docker Internal Errors
+			// see also http://b/161274896 Catch specific case where drive letter other than C: specified for input root on Windows
+			logger.Errorf("non relocatable on windows, but absolute path is not C: drive. %s", r.tree.RootDir())
+			return badRequestError{err: fmt.Errorf("non relocatable %v, but root dir is %q. make request relocatable, or use `C:`", relocatableErr, r.tree.RootDir())}
+		}
 		// https://cloud.google.com/remote-build-execution/docs/remote-execution-properties#container_properties
 		r.addPlatformProperty(ctx, "InputRootAbsolutePath", r.tree.RootDir())
 		wn, data, err := wrapperForWindows(ctx)
 		if err != nil {
+			// missing run.exe?
 			return err
 		}
 		// This is necessary for Win emscripten-releases LLVM build, which uses env vars to specify e.g. include
@@ -801,14 +845,15 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 				envs = append(envs, e)
 			}
 		}
-		files = []fileDesc{
+		files = []merkletree.Entry{
 			{
-				name:         wn,
-				data:         data,
-				isExecutable: true,
+				Name:         wn,
+				Data:         data,
+				IsExecutable: true,
 			},
 		}
 	default:
+		// coding error?
 		return fmt.Errorf("bad wrapper type: %v", wt)
 	}
 
@@ -816,19 +861,16 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 	// `wrapperPath` in `r.args` later.
 	wrapperPath := ""
 	for i, w := range files {
-		wp, err := rootRel(r.filepath, w.name, cleanCWD, cleanRootDir)
+		w.Name, err = rootRel(r.filepath, w.Name, cleanCWD, cleanRootDir)
 		if err != nil {
+			// rootRel should not fail with any user input at this point?
 			return err
 		}
 
-		logger.Infof("file (%d) %s => %v", i, wp, w.data.Digest())
-		r.tree.Set(merkletree.Entry{
-			Name:         wp,
-			Data:         w.data,
-			IsExecutable: w.isExecutable,
-		})
+		logger.Infof("file (%d) %s => %v", i, w.Name, w.Data.Digest())
+		r.tree.Set(w)
 		if wrapperPath == "" {
-			wrapperPath = wp
+			wrapperPath = w.Name
 		}
 	}
 
@@ -847,6 +889,47 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		logger.Errorf("record wrapper-count %s: %v", wt, err)
 	}
 	return nil
+}
+
+func (r *request) maybeApplyHardening(ctx context.Context, wt string, files []merkletree.Entry, wrapperData digest.Data) ([]merkletree.Entry, digest.Data) {
+	logger := log.FromContext(ctx)
+	if f, disable := disableHardening(r.f.DisableHardenings, r.cmdFiles); disable {
+		logger.Infof("run with %s (disable hardening for %v)", wt, f)
+	} else if rand.Float64() < r.f.HardeningRatio {
+		if rand.Float64() < r.f.NsjailRatio {
+			logger.Infof("run with %s + nsjail", wt)
+			wrapperData = digest.Bytes("nsjail-hardening-wrapper-scrpt", []byte(nsjailHardeningWrapperScript))
+			// needed for nsjail
+			r.addPlatformProperty(ctx, "dockerPrivileged", "true")
+			files = append(files, merkletree.Entry{
+				Name: "nsjail.cfg",
+				Data: digest.Bytes("nsjail.cfg", []byte(nsjailHardeningConfig)),
+			})
+		} else {
+			logger.Infof("run with %s + runsc", wt)
+			r.addPlatformProperty(ctx, "dockerRuntime", "runsc")
+		}
+	} else {
+		logger.Infof("run with %s", wt)
+	}
+	return files, wrapperData
+}
+
+func disableHardening(hashes []string, cmdFiles []*cmdpb.FileSpec) (*cmdpb.FileSpec, bool) {
+	for _, h := range hashes {
+		if h == "" {
+			continue
+		}
+		for _, f := range cmdFiles {
+			if f.GetSymlink() != "" {
+				continue
+			}
+			if f.GetHash() == h {
+				return f, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // TODO: refactor with exec/clang.go, exec/clangcl.go?
@@ -875,22 +958,42 @@ func addTargetIfNotExist(args []string, target string) []string {
 	return append(args, fmt.Sprintf("--target=%s", target))
 }
 
+type unknownFlagError struct {
+	arg string
+}
+
+func (e unknownFlagError) Error() string {
+	return fmt.Sprintf("unknown flag: %s", e.arg)
+}
+
 // relocatableReq checks args, envs is relocatable, respecting cmdConfig.
 func relocatableReq(ctx context.Context, cmdConfig *cmdpb.Config, filepath clientFilePath, args, envs []string) error {
-	switch name := cmdConfig.GetCmdDescriptor().GetSelector().GetName(); name {
+	name := cmdConfig.GetCmdDescriptor().GetSelector().GetName()
+	var err error
+	switch name {
 	case "gcc", "g++", "clang", "clang++":
-		return gccRelocatableReq(filepath, args, envs)
+		err = gccRelocatableReq(filepath, args, envs)
 	case "clang-cl":
-		return clangclRelocatableReq(filepath, args, envs)
+		err = clangclRelocatableReq(filepath, args, envs)
 	case "javac":
 		// Currently, javac in Chromium is fully relocatable. Simpler just to
 		// support only the relocatable case and let it fail if the client passed
 		// in invalid absolute paths.
-		return nil
+		err = nil
 	default:
 		// "cl.exe", "clang-tidy"
-		return fmt.Errorf("no relocatable check for %s", name)
+		err = fmt.Errorf("no relocatable check for %s", name)
 	}
+	if err != nil {
+		var uerr unknownFlagError
+		if errors.As(err, &uerr) {
+			if serr := stats.RecordWithTags(ctx, []tag.Mutator{tag.Upsert(compilerNameKey, name)}, unknownFlagCount.M(1)); serr != nil {
+				logger := log.FromContext(ctx)
+				logger.Errorf("record unknown-flag %s: %v", name, serr)
+			}
+		}
+	}
+	return err
 }
 
 // outputs gets output filenames from gomaReq.
@@ -1206,7 +1309,6 @@ func timestampSub(ctx context.Context, t1, t2 *tspb.Timestamp) time.Duration {
 func (r *request) newResp(ctx context.Context, eresp *rpb.ExecuteResponse, cached bool) (*gomapb.ExecResp, error) {
 	logger := log.FromContext(ctx)
 	if r.err != nil {
-		logger.Warnf("error during exec: %v", r.err)
 		return nil, r.Err()
 	}
 	logger.Debugf("response %v cached=%t", eresp, cached)
@@ -1251,6 +1353,7 @@ func (r *request) newResp(ctx context.Context, eresp *rpb.ExecuteResponse, cache
 		execTime,
 		outputTime)
 	tags := []tag.Mutator{
+		// exit_code=159 is seccomp violation.
 		tag.Upsert(rbeExitKey, fmt.Sprintf("%d", eresp.Result.GetExitCode())),
 		tag.Upsert(rbeCacheKey, r.gomaResp.GetCacheHit().String()),
 		tag.Upsert(rbePlatformOSFamilyKey, osFamily),
@@ -1272,13 +1375,20 @@ func (r *request) newResp(ctx context.Context, eresp *rpb.ExecuteResponse, cache
 		instance: r.instanceName(),
 		gomaFile: r.f.GomaFile,
 	}
-	// TODO: gomaOutput should return err for codes.Unauthenticated,
+	// gomaOutput should return err for codes.Unauthenticated,
 	// instead of setting ErrorMessage in r.gomaResp,
 	// so it returns to caller (i.e. frontend), and retry with new
-	// refreshed oauth2 access.
-	// token.
-	gout.stdoutData(ctx, eresp)
-	gout.stderrData(ctx, eresp)
+	// refreshed oauth2 access token.
+	for _, f := range []func(context.Context, *rpb.ExecuteResponse) error{
+		gout.stdoutData,
+		gout.stderrData,
+	} {
+		err := f(ctx, eresp)
+		if status.Code(err) == codes.Unauthenticated && r.err == nil {
+			r.err = err
+			return r.gomaResp, r.Err()
+		}
+	}
 
 	if len(r.gomaResp.Result.StdoutBuffer) > 0 {
 		// docker failure would be error of goma server, not users.
@@ -1314,7 +1424,11 @@ func (r *request) newResp(ctx context.Context, eresp *rpb.ExecuteResponse, cache
 			r.gomaResp.ErrorMessage = append(r.gomaResp.ErrorMessage, fmt.Sprintf("output path %s: %v", output.Path, err))
 			continue
 		}
-		gout.outputFile(ctx, fname, output)
+		err = gout.outputFile(ctx, fname, output)
+		if err != nil && r.err == nil {
+			r.err = err
+			return r.gomaResp, r.Err()
+		}
 	}
 	for _, output := range eresp.Result.OutputDirectories {
 		if r.err != nil {
@@ -1327,7 +1441,11 @@ func (r *request) newResp(ctx context.Context, eresp *rpb.ExecuteResponse, cache
 			r.gomaResp.ErrorMessage = append(r.gomaResp.ErrorMessage, fmt.Sprintf("output path %s: %v", output.Path, err))
 			continue
 		}
-		gout.outputDirectory(ctx, r.filepath, fname, output, r.f.OutputFileSema)
+		err = gout.outputDirectory(ctx, r.filepath, fname, output, r.f.OutputFileSema)
+		if err != nil && r.err == nil {
+			r.err = err
+			return r.gomaResp, r.Err()
+		}
 	}
 	if len(r.gomaResp.ErrorMessage) == 0 {
 		r.gomaResp.Result.ExitStatus = proto.Int32(eresp.Result.ExitCode)
@@ -1357,15 +1475,23 @@ func platformOSFamily(p *rpb.Platform) string {
 }
 
 func platformDockerRuntime(p *rpb.Platform) string {
+	priv := false
+	runAsRoot := false
 	for _, p := range p.Properties {
 		switch p.Name {
 		case "dockerRuntime":
 			return p.Value
 		case "dockerPrivileged":
-			if p.Value == "true" {
-				return "nsjail"
-			}
+			priv = p.Value == "true"
+		case "dockerRunAsRoot":
+			runAsRoot = p.Value == "true"
 		}
+	}
+	switch {
+	case priv && runAsRoot:
+		return "nsjail-chroot"
+	case priv:
+		return "nsjail"
 	}
 	return "default"
 }

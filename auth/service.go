@@ -123,19 +123,28 @@ func (s *Service) Auth(ctx context.Context, req *authpb.AuthReq) (*authpb.AuthRe
 				te.Group, te.Token, err = s.checkToken(ctx, token, te.TokenInfo)
 				if err != nil {
 					te.TokenInfo.Err = err
+					// set 30 seconds negative cache (rejected user / wrong config).
+					// more than exiryDelta (10 secs)
+					// less than client ping timeout.
+					te.TokenInfo.ExpiresAt = time.Now().Add(30 * time.Second)
 				}
 				if te.Token != nil && !te.Token.Expiry.IsZero() && te.Token.Expiry.Before(te.TokenInfo.ExpiresAt) {
 					te.TokenInfo.ExpiresAt = te.Token.Expiry
 				}
 			}
-			go s.scheduledRun(expiryTime(te.TokenInfo.ExpiresAt), func() {
+			switch status.Code(te.TokenInfo.Err) {
+			case codes.OK, codes.PermissionDenied, codes.Internal:
+				go s.scheduledRun(expiryTime(te.TokenInfo.ExpiresAt), func() {
+					s.mu.Lock()
+					delete(s.tokenCache, k)
+					s.mu.Unlock()
+				})
 				s.mu.Lock()
-				delete(s.tokenCache, k)
+				s.tokenCache[k] = te
 				s.mu.Unlock()
-			})
-			s.mu.Lock()
-			s.tokenCache[k] = te
-			s.mu.Unlock()
+			default:
+				// don't cache other error data.
+			}
 			return te, nil
 		})
 		if err != nil {

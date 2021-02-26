@@ -10,6 +10,7 @@ import (
 
 	"go.opencensus.io/plugin/ocgrpc"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/encoding/gzip" // also register compressor for server side
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -17,10 +18,12 @@ import (
 func DefaultDialOption() []grpc.DialOption {
 	return []grpc.DialOption{
 		grpc.WithInsecure(),
-		grpc.WithStatsHandler(&ocgrpc.ClientHandler{}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time: 10 * time.Second,
+			Time:                10 * time.Second,
+			Timeout:             5 * time.Second,
+			PermitWithoutStream: false,
 		}),
+		grpc.WithStatsHandler(&ocgrpc.ClientHandler{}),
 	}
 }
 

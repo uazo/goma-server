@@ -6,6 +6,7 @@ package authdb
 
 import (
 	"context"
+	"time"
 
 	"go.chromium.org/goma/server/httprpc"
 	"go.chromium.org/goma/server/log"
@@ -28,6 +29,8 @@ func (c Client) IsMember(ctx context.Context, email, group string) bool {
 	}
 	resp := &pb.CheckMembershipResp{}
 	err := rpc.Retry{}.Do(ctx, func() error {
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
 		return c.Client.Call(ctx, req, resp)
 	})
 	if err != nil {

@@ -11,10 +11,14 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/gomodule/redigo/redis"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"go.chromium.org/goma/server/log"
 	pb "go.chromium.org/goma/server/proto/cache"
 	"go.chromium.org/goma/server/rpc"
 )
@@ -23,6 +27,9 @@ import (
 type Client struct {
 	prefix string
 	pool   *redis.Pool
+
+	// to workaround pool.wait. maintain active conns.
+	sema chan struct{}
 }
 
 // AddrFromEnv returns redis server address from environment variables.
@@ -38,18 +45,39 @@ func AddrFromEnv() (string, error) {
 	return fmt.Sprintf("%s:%s", host, port), nil
 }
 
+// Opts is redis client option.
+type Opts struct {
+	// Prefix is key prefix used by the client.
+	Prefix string
+
+	// MaxIdleConns is max number of idle connections.
+	MaxIdleConns int
+
+	// MaxActiveConns is max number of active connections.
+	MaxActiveConns int
+}
+
+// default max number of connections.
+// note: in GCP, redis quota is 65,000
+const (
+	DefaultMaxIdleConns   = 50
+	DefaultMaxActiveConns = 200
+)
+
 // NewClient creates new cache client for redis.
-func NewClient(ctx context.Context, addr, prefix string) Client {
+func NewClient(ctx context.Context, addr string, opts Opts) Client {
 	return Client{
-		prefix: prefix,
+		prefix: opts.Prefix,
 		pool: &redis.Pool{
-			Dial: func() (redis.Conn, error) {
-				return redis.Dial("tcp", addr)
+			DialContext: func(ctx context.Context) (redis.Conn, error) {
+				return redis.DialContext(ctx, "tcp", addr)
 			},
-			MaxIdle:   10,
-			MaxActive: 200,
-			Wait:      true,
+			MaxIdle:   opts.MaxIdleConns,
+			MaxActive: opts.MaxActiveConns,
+			// https://github.com/gomodule/redigo/issues/520
+			Wait: false,
 		},
+		sema: make(chan struct{}, opts.MaxActiveConns),
 	}
 }
 
@@ -79,6 +107,9 @@ func isConnError(err error) bool {
 
 // retryErr converts err to rpc.RetriableError if it is retriable error.
 func retryErr(err error) error {
+	if errors.Is(err, redis.ErrNil) {
+		return status.Error(codes.NotFound, err.Error())
+	}
 	// retriable if temporary error.
 	if terr, ok := err.(temporary); ok && terr.Temporary() {
 		return rpc.RetriableError{
@@ -99,9 +130,47 @@ func retryErr(err error) error {
 	return err
 }
 
+type activeConn struct {
+	redis.Conn
+	c Client
+}
+
+func (c activeConn) Close() error {
+	<-c.c.sema
+	return c.Conn.Close()
+}
+
+func (c Client) poolGetContext(ctx context.Context) (redis.Conn, error) {
+	t := time.Now()
+	select {
+	case c.sema <- struct{}{}:
+		d := time.Since(t)
+		if d > 100*time.Millisecond {
+			logger := log.FromContext(ctx)
+			logger.Warnf("redis pool wait %s actives=%d", d, len(c.sema))
+		}
+		conn, err := c.pool.GetContext(ctx)
+		if err != nil {
+			<-c.sema
+			return nil, err
+		}
+		return activeConn{
+			Conn: conn,
+			c:    c,
+		}, nil
+	case <-ctx.Done():
+		d := time.Since(t)
+		if d > 100*time.Millisecond {
+			logger := log.FromContext(ctx)
+			logger.Warnf("redis pool timed-out wait %s actives=%d", d, len(c.sema))
+		}
+		return nil, ctx.Err()
+	}
+}
+
 // Get fetches value for the key from redis.
 func (c Client) Get(ctx context.Context, in *pb.GetReq, opts ...grpc.CallOption) (*pb.GetResp, error) {
-	conn, err := c.pool.GetContext(ctx)
+	conn, err := c.poolGetContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +196,7 @@ func (c Client) Get(ctx context.Context, in *pb.GetReq, opts ...grpc.CallOption)
 
 // Put stores key:value pair on redis.
 func (c Client) Put(ctx context.Context, in *pb.PutReq, opts ...grpc.CallOption) (*pb.PutResp, error) {
-	conn, err := c.pool.GetContext(ctx)
+	conn, err := c.poolGetContext(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -25,6 +25,12 @@ var (
 
 	wrapperTypeKey = tag.MustNewKey("wrapper")
 
+	unknownFlagCount = stats.Int64(
+		"go.chromium.org/goma/server/remoteexec.unknown-flags",
+		"Number of requests with unknown flags",
+		stats.UnitDimensionless)
+	compilerNameKey = tag.MustNewKey("compiler")
+
 	inputBufferAllocSize = stats.Int64(
 		"go.chromium.org/goma/server/remoteexec.input-buffer-alloc",
 		"Size to allocate buffer for input files",
@@ -113,6 +119,13 @@ var (
 				wrapperTypeKey,
 			},
 			Measure:     wrapperCount,
+			Aggregation: view.Count(),
+		},
+		{
+			Measure: unknownFlagCount,
+			TagKeys: []tag.Key{
+				compilerNameKey,
+			},
 			Aggregation: view.Count(),
 		},
 		{
