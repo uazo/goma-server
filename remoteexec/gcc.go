@@ -186,6 +186,9 @@ Loop:
 		case arg == "-idirafter":
 			pathFlag = true
 
+		case arg == "-fno-experimental-new-pass-manager":
+			continue
+
 		case strings.HasPrefix(arg, "-"): // unknown flag?
 			return unknownFlagError{arg: arg}
 
@@ -258,6 +261,8 @@ func clangArgRelocatable(filepath clientFilePath, args []string) error {
 			skipFlag = true
 		case arg == "-load":
 			pathFlag = true
+		case arg == "-fno-experimental-new-pass-manager":
+			continue
 		case strings.HasPrefix(arg, "-debug-info-kind="):
 		default:
 			return unknownFlagError{arg: fmt.Sprintf("clang: %s", arg)}
