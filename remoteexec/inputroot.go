@@ -39,7 +39,9 @@ func commonDir(filepath clientFilePath, paths []string) string {
 	}
 	path := filepath.SplitElem(paths[0])
 	for _, p := range paths[1:] {
-		path = samePathElement(filepath, path, filepath.SplitElem(p))
+               if strings.HasPrefix(p, "/usr") == false {
+                       path = samePathElement(filepath, path, filepath.SplitElem(p))
+               }
 	}
 	return filepath.Join(path...)
 }
