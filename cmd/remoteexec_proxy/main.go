@@ -96,10 +96,10 @@ func myEmail(ctx context.Context) string {
 		}
 		username = u.Username
 	}
-	buf, err := ioutil.ReadFile("/etc/mailname")
-	if err != nil {
-		logger.Fatalf("failed to get email: need --allowed-users: %v", err)
-	}
+	// buf, err := ioutil.ReadFile("/etc/mailname")
+	// if err != nil {
+	// 	logger.Fatalf("failed to get email: need --allowed-users: %v", err)
+	// }
 	return fmt.Sprintf("%s@%s", username, strings.TrimSpace(string(buf)))
 }
 
