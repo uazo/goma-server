@@ -93,7 +93,13 @@ func Relocate(setup *pb.CmdDescriptor_Setup, cmdpath string) (*pb.CmdDescriptor_
 	}
 	s := proto.Clone(setup).(*pb.CmdDescriptor_Setup)
 	origin := filepath.Dir(cmdpath)
-	s.CmdFile.Path = cmdpath
+//	s.CmdFile.Path = cmdpath
+	progpath, e := AbsCmdPath(s)
+	if e != nil {
+		return nil, e
+	}
+	s.CmdFile.Path = progpath
+
 	for _, f := range s.Files {
 		if filepath.IsAbs(f.Path) {
 			continue

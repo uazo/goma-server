@@ -552,6 +552,7 @@ func (r *request) newInputTree(ctx context.Context) *gomapb.ExecResp {
 	}
 
 	symAbsOk := r.f.capabilities.GetCacheCapabilities().GetSymlinkAbsolutePathStrategy() == rpb.SymlinkAbsolutePathStrategy_ALLOWED
+	symAbsOk = true
 
 	for _, f := range r.cmdFiles {
 		if _, found := toolchainInputs[f.Path]; found {
@@ -776,7 +777,7 @@ func (r *request) newWrapperScript(ctx context.Context, cmdConfig *cmdpb.Config,
 		wrapperData := digest.Bytes("wrapper-script", []byte(wrapperScript))
 		files, wrapperData = r.maybeApplyHardening(ctx, "InputRootAbsolutePath", files, wrapperData)
 		// https://cloud.google.com/remote-build-execution/docs/remote-execution-properties#container_properties
-		r.addPlatformProperty(ctx, "InputRootAbsolutePath", r.tree.RootDir())
+        //r.addPlatformProperty(ctx, "InputRootAbsolutePath", r.tree.RootDir())
 		for _, e := range r.gomaReq.Env {
 			envs = append(envs, e)
 		}
