@@ -451,9 +451,6 @@ func main() {
 					RbeInstanceBasename: path.Base(*remoteInstanceName),
 					Properties: []*cmdpb.RemoteexecPlatform_Property{
 						{
-							Name:  "container-image",
-							Value: *platformContainerImage,
-						}, {
 							Name:  "OSFamily",
 							Value: "Linux",
 						},
