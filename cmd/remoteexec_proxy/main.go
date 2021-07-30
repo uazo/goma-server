@@ -84,6 +84,8 @@ var (
 
 	redisMaxIdleConns   = flag.Int("redis-max-idle-conns", redis.DefaultMaxIdleConns, "maximum number of idle connections to redis.")
 	redisMaxActiveConns = flag.Int("redis-max-active-conns", redis.DefaultMaxActiveConns, "maximum number of active connections to redis.")
+
+	preLoad       = flag.Bool("preload", false, "preload packages and exit")
 )
 
 func myEmail(ctx context.Context) string {
@@ -541,5 +543,8 @@ func main() {
 		}
 	}))
 	hsMain := server.NewHTTP(*port, mux)
-	server.Run(ctx, hsMain)
+
+	if *preLoad == false {
+		server.Run(ctx, hsMain)
+	}
 }
